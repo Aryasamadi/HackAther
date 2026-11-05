@@ -162,7 +162,9 @@ class ARESBot:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Periodic Strix checkpoint failed; previous checkpoint remains intact")
+                logger.exception(
+                    "Periodic Strix checkpoint failed; previous checkpoint remains intact"
+                )
 
     @staticmethod
     def _should_auto_resume(control: object) -> bool:
@@ -831,8 +833,14 @@ class ARESBot:
             self._set_scan_control(run_name, "running", "running")
             try:
                 await self._save_state()
+                await self._checkpoint_snapshot()
             except Exception:
                 await self.adapter.stop_scan()
+                self._set_scan_control(run_name, "recovery_required", "initial_checkpoint_failed")
+                try:
+                    await self._save_state()
+                except Exception:
+                    logger.exception("Could not persist failed initial checkpoint state")
                 raise
             await self.render_menu(
                 chat_id,
@@ -913,7 +921,17 @@ class ARESBot:
             )
             self.state["active_run"] = name
             self._set_scan_control(name, "running", "running")
-            await self._save_state()
+            try:
+                await self._save_state()
+                await self._checkpoint_snapshot()
+            except Exception:
+                await self.adapter.stop_scan()
+                self._set_scan_control(name, "recovery_required", "resume_checkpoint_failed")
+                try:
+                    await self._save_state()
+                except Exception:
+                    logger.exception("Could not persist failed Resume checkpoint state")
+                raise
             await self.render_menu(
                 chat_id,
                 f"<b>Strix live control</b>\nRun: <code>{_h(name)}</code>\nStatus: <b>running</b>",
