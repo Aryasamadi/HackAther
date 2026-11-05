@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -361,6 +362,13 @@ class StrixAdapter:
             "usage": usage,
             "error": self.scan_error or controller_state.get("error"),
             "mcp_connections": controller_state.get("connections", []),
+            "budget_paused": bool(
+                getattr(
+                    self.coordinator,
+                    "operator_paused",
+                    getattr(self.coordinator, "budget_paused", False),
+                )
+            ) if self.coordinator is not None else False,
         }
 
     def events_for_agent(self, agent_id: str) -> list[dict[str, Any]]:
@@ -437,6 +445,26 @@ class StrixAdapter:
             }
             for item in list_run_summaries()
         ]
+
+    def delete_history_item(self, run_name: str) -> None:
+        """Delete exactly one completed Strix run directory, never shared state."""
+        if not run_name or Path(run_name).name != run_name or run_name in {".", ".."}:
+            raise ValueError("Invalid run name")
+        if self.running and run_name == self.run_name:
+            raise ValueError("The active scan cannot be deleted")
+
+        known_runs = {item["run_name"] for item in self.history()}
+        if run_name not in known_runs:
+            raise ValueError("Run not found")
+
+        runs_root = run_dir_for("_ares_path_check_").parent.resolve()
+        target = run_dir_for(run_name).resolve()
+        if target.parent != runs_root or target == runs_root:
+            raise ValueError("Run path is outside the Strix history directory")
+        if not target.is_dir() or not (target / "run.json").is_file():
+            raise ValueError("Run not found")
+
+        shutil.rmtree(target)
 
     def report_markdown(self, run_name: str | None = None) -> str:
         name = run_name or self.run_name
