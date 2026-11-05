@@ -22,7 +22,11 @@ DEFAULT_STATE: dict[str, Any] = {
         "max_budget_usd": None,
         "max_turns": 500,
         "scope_mode": "auto",
+        "diff_base": None,
     },
+    "mcp_servers": [],
+    "mcp_only": [],
+    "mcp_exclude": [],
     "active_run": None,
 }
 

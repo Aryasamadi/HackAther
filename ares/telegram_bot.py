@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import re
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,6 +16,7 @@ from ares.providers import discover_models, new_provider, parse_provider_descrip
 from ares.snapshot import restore_snapshot
 from ares.state_store import StateStore
 from ares.strix_adapter import StrixAdapter
+from strix.tools.mcp import McpConnectionConfig
 
 
 logger = logging.getLogger(__name__)
@@ -38,6 +42,20 @@ class TelegramAPI:
         if not result.get("ok"):
             raise RuntimeError(f"Telegram API {method} failed: {result.get('description', 'unknown error')}")
         return result.get("result")
+
+    async def download_document(self, file_id: str, destination: Path) -> Path:
+        metadata = await self.call("getFile", {"file_id": file_id})
+        file_path = metadata.get("file_path") if isinstance(metadata, dict) else None
+        if not isinstance(file_path, str) or not file_path:
+            raise RuntimeError("Telegram did not return a valid document path")
+        file_url = f"{self.base.replace('/bot', '/file/bot')}/{file_path}"
+        response = await self.client.get(file_url)
+        response.raise_for_status()
+        if len(response.content) > 20 * 1024 * 1024:
+            raise ValueError("This Telegram Bot API download is larger than 20 MiB")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(response.content)
+        return destination
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -113,7 +131,8 @@ class ARESBot:
         return [
             [_button("🚀 New scan", "scan:new"), _button("🧠 Models", "models:list")],
             [_button("📡 Live control", "run:dashboard"), _button("📚 Scan history", "runs:list")],
-            [_button("⚙️ Settings", "settings:show"), _button("ℹ️ Engine info", "engine:info")],
+            [_button("⚙️ Settings", "settings:show"), _button("🔌 MCP servers", "mcp:list")],
+            [_button("ℹ️ Engine info", "engine:info")],
         ]
 
     async def show_home(self, chat_id: int) -> None:
@@ -135,6 +154,65 @@ class ARESBot:
         providers = self.state.get("providers", {})
         provider = providers.get(provider_id) if isinstance(providers, dict) else None
         return provider if isinstance(provider, dict) else None
+
+    async def _show_mcp_menu(self, chat_id: int) -> None:
+        servers = self.state.get("mcp_servers", [])
+        rows: list[list[dict[str, str]]] = []
+        if isinstance(servers, list):
+            for index, item in enumerate(servers):
+                if isinstance(item, dict):
+                    transport = str(item.get("transport", "http"))
+                    rows.append([_button(
+                        f"{item.get('name', 'unnamed')} · {transport}"[:60],
+                        f"mcp:view:{index}",
+                    )])
+        rows.append([_button("➕ Add MCP connection", "mcp:add")])
+        rows.append([_button("⬅️ Main menu", "menu:home")])
+        statuses = self.adapter.snapshot().get("mcp_connections", [])
+        status_text = ", ".join(
+            f"{item.get('name')}: {'offline' if item.get('dead') else 'connected'}"
+            for item in statuses
+        ) or "No active scan connections"
+        await self.send(
+            chat_id,
+            "<b>Strix MCP connections</b>\n"
+            f"Configured: <b>{len(servers) if isinstance(servers, list) else 0}</b>\n"
+            f"Active run: {_h(status_text)}\n\n"
+            "Entries are validated with Strix's native MCP schema. HTTP and stdio transports are supported.",
+            rows,
+        )
+
+    async def _begin_mcp_add(self, chat_id: int) -> None:
+        self.state["pending"] = {"kind": "mcp", "step": "json"}
+        await self.send(
+            chat_id,
+            "<b>Add MCP connection</b>\n"
+            "Paste one Strix MCP connection JSON object in this private chat. Authenticated "
+            "server tokens are stored encrypted.\n\n"
+            "<code>{\"name\":\"github\",\"transport\":\"http\","
+            "\"url\":\"https://mcp.example.com/mcp\","
+            "\"auth\":{\"kind\":\"bearer\",\"token\":\"YOUR_TOKEN\"}}</code>\n\n"
+            "For stdio, use transport=stdio, command and optional args/env. "
+            "The full Strix schema is accepted. Send /cancel to abort.",
+        )
+
+    async def _show_mcp_detail(self, chat_id: int, index: int) -> None:
+        servers = self.state.get("mcp_servers", [])
+        if not isinstance(servers, list) or not 0 <= index < len(servers):
+            await self.send(chat_id, "MCP connection not found.")
+            return
+        item = servers[index]
+        safe = dict(item)
+        auth = safe.get("auth")
+        if isinstance(auth, dict):
+            safe["auth"] = {"kind": auth.get("kind"), "token": "••••••••"}
+        serialized = json.dumps(safe, ensure_ascii=False, indent=2)
+        await self.send(
+            chat_id,
+            f"<b>{_h(item.get('name', 'MCP server'))}</b>\n<pre>{_h(serialized[:2800])}</pre>",
+            [[_button("🗑 Remove connection", f"mcp:delete:{index}")],
+             [_button("⬅️ MCP list", "mcp:list")]],
+        )
 
     async def _models_menu(self, chat_id: int) -> None:
         providers = self.state.get("providers", {})
@@ -213,6 +291,35 @@ class ARESBot:
             await self.send(chat_id, "Operation cancelled.", self.home_keyboard())
             return True
 
+        if kind == "mcp" and step == "json":
+            try:
+                raw = json.loads(value)
+                entries = raw if isinstance(raw, list) else [raw]
+                current = self.state.setdefault("mcp_servers", [])
+                if not isinstance(current, list):
+                    raise ValueError("Stored MCP configuration has an invalid format")
+                known = {str(item.get("name")) for item in current if isinstance(item, dict)}
+                validated = []
+                for entry in entries:
+                    config = McpConnectionConfig.model_validate(entry)
+                    if config.name in known:
+                        raise ValueError(f"MCP connection '{config.name}' already exists")
+                    known.add(config.name)
+                    validated.append(config.model_dump(mode="json", exclude_none=True))
+                if not validated:
+                    raise ValueError("No MCP connection was provided")
+                current.extend(validated)
+                self.state["pending"] = None
+                names = ", ".join(str(item["name"]) for item in validated)
+                await self.send(
+                    chat_id,
+                    f"✅ Saved {len(validated)} native Strix MCP connection(s): <b>{_h(names)}</b>",
+                    [[_button("Open MCP manager", "mcp:list")]],
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                await self.send(chat_id, f"MCP configuration was not saved:\n<code>{_h(str(exc)[:1000])}</code>")
+            return True
+
         if kind == "provider":
             if step == "provider":
                 try:
@@ -278,9 +385,23 @@ class ARESBot:
                 )
                 return True
             if step == "instruction":
-                instruction = "" if value == "-" else value
-                self.state["pending"] = None
-                await self._launch_scan(chat_id, pending.get("targets", []), instruction)
+                pending["instruction"] = "" if value == "-" else value
+                pending["workspace_files"] = []
+                pending["step"] = "attachments"
+                await self.send(
+                    chat_id,
+                    "<b>Optional workspace files</b>\n"
+                    "Upload documents such as API specifications, source files, notes or wordlists. "
+                    "You can send multiple files, then press Continue.",
+                    [[_button("Continue without more files ➡️", "scan:files_done")]],
+                )
+                return True
+            if step == "attachments":
+                await self.send(
+                    chat_id,
+                    "Upload another document or press Continue when ready.",
+                    [[_button("Continue ➡️", "scan:files_done")]],
+                )
                 return True
 
         if kind == "steer":
@@ -299,7 +420,13 @@ class ARESBot:
 
         return False
 
-    async def _launch_scan(self, chat_id: int, targets: list[str], instruction: str) -> None:
+    async def _launch_scan(
+        self,
+        chat_id: int,
+        targets: list[str],
+        instruction: str,
+        workspace_files: list[str] | None = None,
+    ) -> None:
         provider = self._active_provider()
         model = self.state.get("active_model")
         if provider is None or not isinstance(model, str) or not model:
@@ -312,8 +439,14 @@ class ARESBot:
                 provider=provider,
                 model=model,
                 scan_mode=str(self.state.get("settings", {}).get("scan_mode", "deep")),
+                scope_mode=str(self.state.get("settings", {}).get("scope_mode", "auto")),
+                diff_base=self.state.get("settings", {}).get("diff_base"),
                 max_budget_usd=self.state.get("settings", {}).get("max_budget_usd"),
                 max_turns=int(self.state.get("settings", {}).get("max_turns", 500)),
+                workspace_files=workspace_files or [],
+                mcp_servers=self.state.get("mcp_servers", []),
+                mcp_only=self.state.get("mcp_only", []),
+                mcp_exclude=self.state.get("mcp_exclude", []),
             )
             self.state["active_run"] = run_name
             result = await self.send(
@@ -340,6 +473,9 @@ class ARESBot:
                 model=model,
                 max_budget_usd=self.state.get("settings", {}).get("max_budget_usd"),
                 max_turns=int(self.state.get("settings", {}).get("max_turns", 500)),
+                mcp_servers=self.state.get("mcp_servers", []),
+                mcp_only=self.state.get("mcp_only", []),
+                mcp_exclude=self.state.get("mcp_exclude", []),
             )
             self.state["active_run"] = name
             result = await self.send(chat_id, f"▶️ Resumed Strix run <code>{_h(name)}</code>.", self._run_keyboard())
@@ -350,8 +486,10 @@ class ARESBot:
     def _run_keyboard(self) -> list[list[dict[str, str]]]:
         return [
             [_button("🤖 Agents", "run:agents"), _button("🔎 Findings", "run:findings")],
+            [_button("🧾 Events", "run:events"), _button("🔌 MCP status", "mcp:status")],
             [_button("⏸ Pause budget", "run:pause"), _button("▶️ Resume budget", "run:resume_budget")],
             [_button("🛑 Stop scan", "run:stop"), _button("📄 Report", "run:report")],
+            [_button("🌐 Strix Viewer", "run:viewer")],
             [_button("⬅️ Main menu", "menu:home")],
         ]
 
@@ -422,6 +560,7 @@ class ARESBot:
             text,
             [[_button("✉️ Send instruction", f"agent:message:{agent_id}"),
               _button("⏹ Stop agent", f"agent:stop:{agent_id}")],
+             [_button("🧾 Agent events", f"agent:events:{agent_id}")],
              [_button("⬅️ Agents", "run:agents")]],
         )
 
@@ -430,13 +569,99 @@ class ARESBot:
         if not findings:
             await self.send(chat_id, "No findings have been recorded yet.", self._run_keyboard())
             return
-        lines = ["<b>Strix findings</b>"]
-        for index, item in enumerate(findings[:12], 1):
+        rows: list[list[dict[str, str]]] = []
+        lines = ["<b>Strix findings</b>", f"Total: <b>{len(findings)}</b>"]
+        for index, item in enumerate(findings[:20]):
+            title = str(item.get("title", "Untitled finding"))
+            severity = str(item.get("severity", "unknown")).upper()
+            rows.append([_button(f"{severity} · {title}"[:60], f"finding:view:{index}")])
+        rows.append([_button("⬅️ Run controls", "run:dashboard")])
+        await self.send(chat_id, "\n".join(lines), rows)
+
+    async def _show_events(self, chat_id: int) -> None:
+        events = self.adapter.snapshot().get("events", [])
+        if not events:
+            await self.send(chat_id, "No Strix events have been recorded yet.", self._run_keyboard())
+            return
+        lines = ["<b>Recent Strix events</b>"]
+        for item in events[-12:]:
+            agent = str(item.get("agent_id", "agent"))
+            payload = item.get("data", {})
+            if not isinstance(payload, dict):
+                payload = {}
+            content = payload.get("content") or payload.get("tool_name") or payload.get("output") or ""
+            if isinstance(content, (dict, list)):
+                content = json.dumps(content, ensure_ascii=False)
             lines.append(
-                f"{index}. <b>{_h(item.get('severity', 'unknown')).upper()}</b> — "
-                f"{_h(item.get('title', 'Untitled finding'))}"
+                f"• <code>{_h(agent[:12])}</code> · <b>{_h(item.get('type', 'event'))}</b>\n"
+                f"{_h(str(content)[:220])}"
             )
-        await self.send(chat_id, "\n".join(lines), self._run_keyboard())
+        await self.send_long(chat_id, "\n\n".join(lines), self._run_keyboard())
+
+    async def _show_agent_events(self, chat_id: int, agent_id: str) -> None:
+        events = self.adapter.events_for_agent(agent_id)
+        if not events:
+            await self.send(chat_id, "No transcript/events are available for this agent.")
+            return
+        lines = [f"<b>Agent events · {_h(agent_id)}</b>"]
+        for item in events[-10:]:
+            payload = item.get("data", {})
+            if not isinstance(payload, dict):
+                payload = {}
+            content = payload.get("content") or payload.get("tool_name") or payload.get("output") or ""
+            if isinstance(content, (dict, list)):
+                content = json.dumps(content, ensure_ascii=False)
+            lines.append(f"<b>{_h(item.get('type', 'event'))}</b>\n{_h(str(content)[:500])}")
+        await self.send_long(
+            chat_id, "\n\n".join(lines),
+            [[_button("⬅️ Agent", f"agent:view:{agent_id}")]],
+        )
+
+    async def _show_finding(self, chat_id: int, index: int) -> None:
+        findings = self.adapter.snapshot().get("findings", [])
+        if not 0 <= index < len(findings):
+            await self.send(chat_id, "Finding not found.")
+            return
+        finding = findings[index]
+        fields = [
+            ("Severity", "severity"), ("Confidence", "confidence"), ("Target", "target"),
+            ("Endpoint", "endpoint"), ("Description", "description"), ("Impact", "impact"),
+            ("Technical analysis", "technical_analysis"), ("Evidence", "evidence"),
+            ("Remediation", "remediation_steps"),
+        ]
+        chunks = [f"<b>{_h(finding.get('title', 'Untitled finding'))}</b>"]
+        for label, key in fields:
+            value = finding.get(key)
+            if value:
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, ensure_ascii=False, indent=2)
+                chunks.append(f"<b>{label}</b>\n{_h(str(value)[:900])}")
+        await self.send_long(
+            chat_id, "\n\n".join(chunks),
+            [[_button("⬅️ Findings", "run:findings")]],
+        )
+
+    async def _open_viewer(self, chat_id: int) -> None:
+        try:
+            result = await self.adapter.open_viewer()
+            url = result.get("url")
+            if url:
+                await self.send(
+                    chat_id,
+                    "Strix Viewer started on the GitHub Runner. Its URL is private to that runner "
+                    "and is not directly reachable from your phone through this workflow.\n"
+                    f"Runner-local URL: <code>{_h(url)}</code>",
+                    self._run_keyboard(),
+                )
+            else:
+                await self.send(
+                    chat_id,
+                    f"Viewer status: <b>{_h(result.get('status', 'unavailable'))}</b>\n"
+                    f"{_h(result.get('error', 'No viewer URL returned'))}",
+                    self._run_keyboard(),
+                )
+        except Exception as exc:
+            await self.send(chat_id, f"Viewer could not start: <code>{_h(str(exc)[:700])}</code>")
 
     async def _show_history(self, chat_id: int) -> None:
         rows = []
@@ -466,18 +691,24 @@ class ARESBot:
     async def _settings(self, chat_id: int) -> None:
         settings = self.state.get("settings", {})
         mode = str(settings.get("scan_mode", "deep"))
+        scope = str(settings.get("scope_mode", "auto"))
         rows = [
             [_button(f"Quick{' ✓' if mode == 'quick' else ''}", "settings:mode:quick"),
              _button(f"Standard{' ✓' if mode == 'standard' else ''}", "settings:mode:standard"),
              _button(f"Deep{' ✓' if mode == 'deep' else ''}", "settings:mode:deep")],
             [_button("Set budget", "settings:budget"), _button("Set max turns", "settings:turns")],
+            [
+                _button(f"Scope: {scope}", "settings:scope_menu"),
+                _button("Set diff base", "settings:diff_base"),
+            ],
             [_button("⬅️ Main menu", "menu:home")],
         ]
         await self.send(
             chat_id,
             f"<b>Scan settings</b>\nMode: <b>{_h(mode)}</b>\n"
             f"Budget: <b>{_h(settings.get('max_budget_usd') or 'unlimited')}</b>\n"
-            f"Max turns per agent: <b>{_h(settings.get('max_turns', 500))}</b>",
+            f"Max turns per agent: <b>{_h(settings.get('max_turns', 500))}</b>\n"
+            f"Scope: <b>{_h(scope)}</b> · Diff base: <code>{_h(settings.get('diff_base') or 'default')}</code>",
             rows,
         )
 
@@ -496,6 +727,8 @@ class ARESBot:
                 if value < 1:
                     raise ValueError
                 self.state["settings"]["max_turns"] = value
+            elif pending.get("step") == "diff_base":
+                self.state["settings"]["diff_base"] = None if text.strip() == "-" else text.strip() or None
             self.state["pending"] = None
             await self._settings(chat_id)
         except ValueError:
@@ -524,6 +757,21 @@ class ARESBot:
 
         if data == "menu:home":
             await self.show_home(chat_id)
+        elif data == "mcp:list":
+            await self._show_mcp_menu(chat_id)
+        elif data == "mcp:add":
+            await self._begin_mcp_add(chat_id)
+        elif data == "mcp:status":
+            await self._show_mcp_menu(chat_id)
+        elif action == "mcp" and len(parts) == 3 and parts[1] == "view":
+            await self._show_mcp_detail(chat_id, int(parts[2]))
+        elif action == "mcp" and len(parts) == 3 and parts[1] == "delete":
+            index = int(parts[2])
+            servers = self.state.get("mcp_servers", [])
+            if isinstance(servers, list) and 0 <= index < len(servers):
+                removed = servers.pop(index)
+                await self.send(chat_id, f"Removed MCP connection: <b>{_h(removed.get('name', 'unnamed'))}</b>")
+            await self._show_mcp_menu(chat_id)
         elif data == "models:list":
             await self._models_menu(chat_id)
         elif data == "provider:add":
@@ -556,6 +804,18 @@ class ARESBot:
                 "URLs, domains, IPs, Git repositories and local/API-spec paths available to the runner.\n"
                 "Only test systems you own or are authorized to assess.",
             )
+        elif data == "scan:files_done":
+            pending = self.state.get("pending")
+            if isinstance(pending, dict) and pending.get("kind") == "scan" and pending.get("step") == "attachments":
+                self.state["pending"] = None
+                await self._launch_scan(
+                    chat_id,
+                    pending.get("targets", []),
+                    str(pending.get("instruction", "")),
+                    pending.get("workspace_files", []),
+                )
+            else:
+                await self.send(chat_id, "There is no scan setup waiting for files.")
         elif data == "run:dashboard":
             snap = self.adapter.snapshot()
             await self.send(
@@ -568,6 +828,14 @@ class ARESBot:
             await self._show_agents(chat_id)
         elif data == "run:findings":
             await self._show_findings(chat_id)
+        elif data == "run:events":
+            await self._show_events(chat_id)
+        elif data == "run:viewer":
+            await self._open_viewer(chat_id)
+        elif action == "agent" and len(parts) == 3 and parts[1] == "events":
+            await self._show_agent_events(chat_id, parts[2])
+        elif action == "finding" and len(parts) == 3 and parts[1] == "view":
+            await self._show_finding(chat_id, int(parts[2]))
         elif data == "run:pause":
             await self.adapter.pause_budget()
             await self.send(chat_id, "⏸ Budget pause requested.", self._run_keyboard())
@@ -578,7 +846,11 @@ class ARESBot:
             await self.adapter.stop_scan()
             await self.send(chat_id, "Stop request processed.", self.home_keyboard())
         elif data == "run:report":
-            await self.send_long(chat_id, self.adapter.report_markdown() or "The report is not available yet.", self._run_keyboard())
+            await self.send_long(
+                chat_id,
+                html.escape(self.adapter.report_markdown() or "The report is not available yet."),
+                self._run_keyboard(),
+            )
         elif data == "runs:list":
             await self._show_history(chat_id)
         elif action == "history" and len(parts) == 3 and parts[1] == "view":
@@ -593,7 +865,7 @@ class ARESBot:
                 report = path.read_text(encoding="utf-8")
             except OSError:
                 report = "Report not found."
-            await self.send_long(chat_id, report or "Report is empty.")
+            await self.send_long(chat_id, html.escape(report or "Report is empty."))
         elif action == "agent" and len(parts) == 3 and parts[1] == "view":
             await self._show_agent(chat_id, parts[2])
         elif action == "agent" and len(parts) == 3 and parts[1] == "message":
@@ -608,6 +880,26 @@ class ARESBot:
                 await self._settings(chat_id)
         elif data == "settings:show":
             await self._settings(chat_id)
+        elif data == "settings:scope_menu":
+            scope = str(self.state.get("settings", {}).get("scope_mode", "auto"))
+            await self.send(
+                chat_id,
+                "<b>Scope mode</b>\n"
+                "Auto: Strix decides whether diff scope applies.\n"
+                "Diff: focus on changed files when a Git base is available.\n"
+                "Full: assess the full code target.",
+                [[_button(f"Auto{' ✓' if scope == 'auto' else ''}", "settings:scope:auto"),
+                  _button(f"Diff{' ✓' if scope == 'diff' else ''}", "settings:scope:diff"),
+                  _button(f"Full{' ✓' if scope == 'full' else ''}", "settings:scope:full")],
+                 [_button("⬅️ Settings", "settings:show")]],
+            )
+        elif action == "settings" and len(parts) == 3 and parts[1] == "scope":
+            if parts[2] in {"auto", "diff", "full"}:
+                self.state["settings"]["scope_mode"] = parts[2]
+                await self._settings(chat_id)
+        elif data == "settings:diff_base":
+            self.state["pending"] = {"kind": "setting", "step": "diff_base"}
+            await self.send(chat_id, "Send the Git branch or commit to compare against (for example <code>origin/main</code>). Send <code>-</code> to clear it.")
         elif data == "settings:budget":
             self.state["pending"] = {"kind": "setting", "step": "budget"}
             await self.send(chat_id, "Send the maximum LLM budget in USD, or 0 for unlimited.")
@@ -631,14 +923,39 @@ class ARESBot:
         if chat.get("type") != "private":
             return
         chat_id = int(chat.get("id", self.config.admin_id))
+        pending = self.state.get("pending")
+        document = message.get("document")
+        if (
+            isinstance(pending, dict)
+            and pending.get("kind") == "scan"
+            and pending.get("step") == "attachments"
+            and isinstance(document, dict)
+        ):
+            filename = Path(str(document.get("file_name") or "workspace-file.bin")).name
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)[:100] or "workspace-file.bin"
+            destination = Path(".ares-runtime") / "uploads" / f"{int(time.time())}-{safe_name}"
+            try:
+                saved = await self.telegram.download_document(str(document.get("file_id", "")), destination)
+                pending.setdefault("workspace_files", []).append(str(saved))
+                await self.send(
+                    chat_id,
+                    f"✅ Added workspace file <code>{_h(filename)}</code> "
+                    f"({len(pending['workspace_files'])} file(s) total).",
+                    [[_button("Continue ➡️", "scan:files_done")]],
+                )
+            except Exception as exc:
+                await self.send(chat_id, f"Could not add document: <code>{_h(str(exc)[:700])}</code>")
+            return
         text = str(message.get("text") or "").strip()
         if not text:
             return
         pending = self.state.get("pending")
         if (
             isinstance(pending, dict)
-            and pending.get("kind") == "provider"
-            and pending.get("step") == "token"
+            and (
+                (pending.get("kind") == "provider" and pending.get("step") == "token")
+                or pending.get("kind") == "mcp"
+            )
             and isinstance(message.get("message_id"), int)
         ):
             try:
@@ -647,7 +964,7 @@ class ARESBot:
                     {"chat_id": chat_id, "message_id": message["message_id"]},
                 )
             except httpx.HTTPError:
-                logger.warning("Could not delete the submitted provider-token message")
+                logger.warning("Could not delete a submitted provider/MCP token message")
         command = text.split()[0].split("@", 1)[0].lower()
         if command in {"/start", "/menu"}:
             self.state["pending"] = None
@@ -660,12 +977,30 @@ class ARESBot:
         if command == "/models":
             await self._models_menu(chat_id)
             return
+        if command == "/mcp":
+            await self._show_mcp_menu(chat_id)
+            return
+        if command == "/status":
+            snap = self.adapter.snapshot()
+            await self.send(
+                chat_id,
+                "<b>ARES status</b>\n"
+                "Telegram polling: <b>active</b>\n"
+                f"Runner window: <b>{self.config.runtime_minutes} minutes</b>\n"
+                f"Strix scan: <b>{_h(snap.get('status', 'idle'))}</b>\n"
+                f"Run: <code>{_h(snap.get('run_name') or 'none')}</code>",
+                self.home_keyboard(),
+            )
+            return
         if command == "/scan":
             self.state["pending"] = {"kind": "scan", "step": "target"}
             await self.send(chat_id, "Send target(s), one per line. Only authorized targets.")
             return
         if command == "/runs":
             await self._show_history(chat_id)
+            return
+        if command == "/events":
+            await self._show_events(chat_id)
             return
         if command == "/resume":
             if len(text.split(maxsplit=1)) > 1:

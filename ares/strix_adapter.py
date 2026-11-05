@@ -18,21 +18,21 @@ from strix.interface.scan_setup import (
     telemetry_start,
 )
 from strix.interface.tui.backend.controller import TuiController
-from strix.interface.tui.live_view import TuiLiveView
-from strix.interface.utils import read_workspace_files
+from strix.interface.tui.backend.live_view import TuiLiveView
+from strix.interface.utils import read_workspace_files, resolve_workspace_files
 from strix.report.runs import list_run_summaries
 from strix.report.state import ReportState, set_global_report_state
+from strix.tools.mcp import McpConnectionConfig, McpConnectionRequest
 
 
 logger = logging.getLogger(__name__)
 
 
 class StrixAdapter:
-    """Telegram-facing adapter over Strix's interactive Python runtime.
+    """Telegram adapter over the official Strix interactive runtime.
 
-    It deliberately imports and invokes Strix's own Runner, Coordinator,
-    Controller, report state and event projection. It does not fork or replace
-    the Strix agent implementation.
+    ARES does not clone or reimplement Strix agents. It invokes Strix's runner,
+    coordinator, Go-TUI controller, live projection, MCP contracts and report state.
     """
 
     def __init__(self) -> None:
@@ -45,6 +45,11 @@ class StrixAdapter:
         self.run_name: str | None = None
         self._sync_task: asyncio.Task[None] | None = None
         self._config_path: Path | None = None
+        self._mcp_requests: list[McpConnectionRequest] = []
+        self._workspace_files: list[dict[str, Any]] = []
+        self._scan_mode = "deep"
+        self._scope_mode = "auto"
+        self._diff_base: str | None = None
 
     @property
     def running(self) -> bool:
@@ -70,27 +75,56 @@ class StrixAdapter:
         apply_config_override(self._config_path)
 
     @staticmethod
+    def _build_mcp_requests(
+        configs: list[dict[str, Any]] | None,
+        *,
+        only: list[str] | None = None,
+        exclude: list[str] | None = None,
+    ) -> list[McpConnectionRequest]:
+        validated: list[McpConnectionConfig] = []
+        seen: set[str] = set()
+        for raw in configs or []:
+            config = McpConnectionConfig.model_validate(raw)
+            if config.name in seen:
+                raise ValueError(f"Duplicate MCP connection name: {config.name}")
+            seen.add(config.name)
+            validated.append(config)
+        only_set = {item.strip() for item in (only or []) if item.strip()}
+        exclude_set = {item.strip() for item in (exclude or []) if item.strip()}
+        selected = [
+            item for item in validated
+            if (not only_set or item.name in only_set) and item.name not in exclude_set
+        ]
+        unknown = (only_set | exclude_set) - seen
+        if unknown:
+            raise ValueError("Unknown MCP connection name(s): " + ", ".join(sorted(unknown)))
+        return [McpConnectionRequest(config=item) for item in selected]
+
+    @staticmethod
     def _args(
         *,
         targets: list[str],
         instruction: str,
         scan_mode: str,
+        scope_mode: str,
+        diff_base: str | None,
         max_budget_usd: float | None,
         max_turns: int,
+        workspace_files: list[str] | None = None,
         resume_name: str | None = None,
     ) -> argparse.Namespace:
-        return argparse.Namespace(
+        args = argparse.Namespace(
             target=targets,
             target_list=[],
             instruction=instruction or None,
             instruction_file=None,
-            workspace_file=[],
+            workspace_file=workspace_files or [],
             workspace_files=[],
             non_interactive=False,
             fail_on=None,
             scan_mode=scan_mode,
-            scope_mode="auto",
-            diff_base=None,
+            scope_mode=scope_mode,
+            diff_base=diff_base,
             config=None,
             mcp_config=None,
             mcp_server=None,
@@ -104,11 +138,14 @@ class StrixAdapter:
             run_name=resume_name,
             needs_setup=False,
             resume_picker=False,
-            user_explicit_instruction=instruction if resume_name else None,
+            user_explicit_instruction=None,
             user_instruction=instruction or None,
             workspace_mount=None,
             workspace_subdir=None,
         )
+        args.workspace_files = resolve_workspace_files(args.workspace_file)
+        args.user_explicit_instruction = instruction or None if resume_name else None
+        return args
 
     async def start(
         self,
@@ -118,8 +155,14 @@ class StrixAdapter:
         provider: dict[str, Any],
         model: str,
         scan_mode: str = "deep",
+        scope_mode: str = "auto",
+        diff_base: str | None = None,
         max_budget_usd: float | None = None,
         max_turns: int = 500,
+        workspace_files: list[str] | None = None,
+        mcp_servers: list[dict[str, Any]] | None = None,
+        mcp_only: list[str] | None = None,
+        mcp_exclude: list[str] | None = None,
     ) -> str:
         if self.running:
             raise RuntimeError("A Strix scan is already running")
@@ -127,17 +170,26 @@ class StrixAdapter:
             raise ValueError("At least one target is required")
         if scan_mode not in {"quick", "standard", "deep"}:
             raise ValueError("Unsupported Strix scan mode")
+        if scope_mode not in {"auto", "diff", "full"}:
+            raise ValueError("Unsupported Strix scope mode")
         self._configure_model(provider, model)
         settings = load_settings()
-        model_ref = (settings.llm.model or "").strip()
-        await preflight_model_connection(model_ref, settings=settings)
+        await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
         args = self._args(
             targets=targets,
             instruction=instruction,
             scan_mode=scan_mode,
+            scope_mode=scope_mode,
+            diff_base=diff_base,
             max_budget_usd=max_budget_usd,
             max_turns=max_turns,
+            workspace_files=workspace_files,
         )
+        self._mcp_requests = self._build_mcp_requests(mcp_servers, only=mcp_only, exclude=mcp_exclude)
+        self._workspace_files = args.workspace_files
+        self._scan_mode = scan_mode
+        self._scope_mode = scope_mode
+        self._diff_base = diff_base
         build_targets_info(args)
         prepare_run(args)
         telemetry_start(args)
@@ -153,6 +205,9 @@ class StrixAdapter:
         model: str,
         max_budget_usd: float | None = None,
         max_turns: int = 500,
+        mcp_servers: list[dict[str, Any]] | None = None,
+        mcp_only: list[str] | None = None,
+        mcp_exclude: list[str] | None = None,
     ) -> str:
         if self.running:
             raise RuntimeError("A Strix scan is already running")
@@ -163,6 +218,8 @@ class StrixAdapter:
             targets=[],
             instruction="",
             scan_mode="deep",
+            scope_mode="auto",
+            diff_base=None,
             max_budget_usd=max_budget_usd,
             max_turns=max_turns,
             resume_name=run_name,
@@ -170,6 +227,11 @@ class StrixAdapter:
         from strix.interface.cli_args import load_resume_state
 
         load_resume_state(args)
+        self._mcp_requests = self._build_mcp_requests(mcp_servers, only=mcp_only, exclude=mcp_exclude)
+        self._workspace_files = args.workspace_files
+        self._scan_mode = args.scan_mode
+        self._scope_mode = args.scope_mode
+        self._diff_base = args.diff_base
         prepare_run(args)
         await self._start_runtime(args)
         return run_name
@@ -218,7 +280,7 @@ class StrixAdapter:
             run_strix_scan(
                 scan_config=self.scan_config,
                 scan_id=self.run_name,
-                image=str(settings.runtime.image or "ghcr.io/usestrix/strix-sandbox:latest"),
+                image=str(settings.runtime.image or "strix-sandbox:latest"),
                 local_sources=args.local_sources or [],
                 extra_files=read_workspace_files(args.workspace_files),
                 coordinator=self.coordinator,
@@ -226,6 +288,7 @@ class StrixAdapter:
                 max_turns=args.max_turns,
                 max_budget_usd=args.max_budget_usd,
                 event_sink=self._capture_event,
+                mcp_connection_requests=self._mcp_requests,
                 mcp_status_sink=self._capture_mcp_status,
             ),
             name=f"strix:{self.run_name}",
@@ -255,6 +318,7 @@ class StrixAdapter:
                         status=str(status),
                         error_message=errors.get(agent_id),
                     )
+                self.live_view.flush_user_instruction()
                 if self.controller is not None:
                     self.controller.notify_changed()
             except Exception:
@@ -278,8 +342,9 @@ class StrixAdapter:
             self.controller.notify_changed()
 
     def snapshot(self) -> dict[str, Any]:
-        record = self.report_state.run_record if self.report_state is not None else {}
-        agents = list(self.live_view.agents.values()) if self.live_view is not None else []
+        controller_state = self.controller.snapshot() if self.controller is not None else {}
+        agents = self.controller.collection("agents") if self.controller is not None else []
+        events = self.controller.collection("events") if self.controller is not None else []
         findings = (
             self.report_state.get_existing_vulnerabilities()
             if self.report_state is not None
@@ -287,13 +352,21 @@ class StrixAdapter:
         )
         usage = self.report_state.get_total_llm_usage() if self.report_state is not None else {}
         return {
+            **controller_state,
             "run_name": self.run_name,
-            "status": record.get("status", "running" if self.running else "unknown"),
+            "status": controller_state.get("scan_state", "running" if self.running else "unknown"),
             "agents": agents,
+            "events": events,
             "findings": findings,
             "usage": usage,
-            "error": self.scan_error,
+            "error": self.scan_error or controller_state.get("error"),
+            "mcp_connections": controller_state.get("connections", []),
         }
+
+    def events_for_agent(self, agent_id: str) -> list[dict[str, Any]]:
+        if self.live_view is None:
+            return []
+        return self.live_view.events_for_agent(agent_id)
 
     async def send_message(self, agent_id: str, message: str) -> None:
         if self.controller is None:
@@ -304,6 +377,11 @@ class StrixAdapter:
         if self.controller is None:
             raise RuntimeError("No active Strix controller")
         await self.controller.handle("agent.stop", {"agent_id": agent_id})
+
+    async def open_viewer(self) -> dict[str, Any]:
+        if self.controller is None:
+            raise RuntimeError("No active Strix controller")
+        return await self.controller.handle("viewer.open", {})
 
     async def pause_budget(self) -> None:
         if self.coordinator is None:
@@ -322,6 +400,8 @@ class StrixAdapter:
         roots = [agent_id for agent_id, parent in parents.items() if parent is None]
         if roots:
             await self.coordinator.cancel_descendants_graceful(roots[0])
+        else:
+            self.coordinator.mark_shutting_down()
         task = self.scan_task
         if task is not None:
             try:
@@ -358,10 +438,11 @@ class StrixAdapter:
             for item in list_run_summaries()
         ]
 
-    def report_markdown(self) -> str:
-        if not self.run_name:
+    def report_markdown(self, run_name: str | None = None) -> str:
+        name = run_name or self.run_name
+        if not name:
             return ""
-        path = run_dir_for(self.run_name) / "penetration_test_report.md"
+        path = run_dir_for(name) / "penetration_test_report.md"
         try:
             return path.read_text(encoding="utf-8")
         except OSError:

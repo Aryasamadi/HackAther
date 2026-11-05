@@ -2,6 +2,11 @@ name: ARES Telegram Runtime
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["phase-3/feature-parity"]
+    paths-ignore:
+      - ".ares/**"
+      - "ares-state/**"
   schedule:
     - cron: "*/5 * * * *"
 
