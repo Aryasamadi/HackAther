@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from pathlib import Path
 from typing import Any
@@ -101,22 +102,58 @@ class StateStore:
                 self.remote_sha = remote.get("sha")
                 encoded = remote.get("content", "")
                 if encoded:
-                    encrypted = base64.b64decode(encoded)
-                    # Some GitHub Contents API responses for binary blobs may
-                    # not preserve the base64 representation consistently.
-                    # Retry through the raw media type before treating a
-                    # persisted encrypted state as corrupt.
-                    if not encrypted.startswith(b"ARES1"):
-                        raw_headers = self._headers()
-                        raw_headers["Accept"] = "application/vnd.github.raw"
-                        raw_response = await self._client.get(
-                            self._contents_url(),
-                            headers=raw_headers,
-                            params={"ref": self.branch},
+                    try:
+                        candidate = base64.b64decode(
+                            "".join(encoded.split()), validate=True
                         )
-                        raw_response.raise_for_status()
-                        if raw_response.content.startswith(b"ARES1"):
-                            encrypted = raw_response.content
+                    except (ValueError, binascii.Error):
+                        candidate = b""
+                    if candidate.startswith(b"ARES1"):
+                        encrypted = candidate
+
+                # If the Contents API does not yield the expected binary
+                # header, retrieve the same immutable blob by its Git object
+                # SHA. The Git Blobs API returns a base64 payload in JSON.
+                if not (encrypted and encrypted.startswith(b"ARES1")) and self.remote_sha:
+                    blob_url = (
+                        f"{self._api_base}/repos/{self.repository}/git/blobs/"
+                        f"{self.remote_sha}"
+                    )
+                    blob_response = await self._client.get(
+                        blob_url, headers=self._headers()
+                    )
+                    blob_response.raise_for_status()
+                    blob = blob_response.json()
+                    blob_content = blob.get("content", "")
+                    if blob.get("encoding") == "base64" and blob_content:
+                        try:
+                            candidate = base64.b64decode(
+                                "".join(blob_content.split()), validate=True
+                            )
+                        except (ValueError, binascii.Error):
+                            candidate = b""
+                        if candidate.startswith(b"ARES1"):
+                            encrypted = candidate
+
+                # Keep a raw-media fallback as a final compatibility path.
+                if not (encrypted and encrypted.startswith(b"ARES1")):
+                    raw_headers = self._headers()
+                    raw_headers["Accept"] = "application/vnd.github.raw"
+                    raw_response = await self._client.get(
+                        self._contents_url(),
+                        headers=raw_headers,
+                        params={"ref": self.branch},
+                    )
+                    raw_response.raise_for_status()
+                    if raw_response.content.startswith(b"ARES1"):
+                        encrypted = raw_response.content
+
+                if not (encrypted and encrypted.startswith(b"ARES1")):
+                    raise ValueError(
+                        "GitHub returned .ares/state.enc, but Contents API, "
+                        "Git Blobs API, and raw-media fallback did not return "
+                        "a valid ARES1 payload. Existing remote state was left untouched."
+                    )
             elif response.status_code != 404:
                 response.raise_for_status()
         if encrypted is None and self.local_path.is_file():
