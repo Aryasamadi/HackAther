@@ -12,14 +12,14 @@ _PROVIDER_ID = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 
 
 def parse_provider_descriptor(raw: str) -> tuple[str, str]:
-    """Parse the single Provider field as 'Display name | litellm_provider_id'."""
+    """Parse a display name, defaulting to the OpenAI-compatible LiteLLM route."""
     value = raw.strip()
     if not value:
         raise ValueError("Provider name is required")
     if "|" in value:
         display_name, provider_id = (part.strip() for part in value.split("|", 1))
     else:
-        display_name = provider_id = value
+        display_name, provider_id = value, "openai"
     if not display_name or not _PROVIDER_ID.fullmatch(provider_id):
         raise ValueError(
             "Use a provider name and LiteLLM ID, for example: OpenRouter Personal | openrouter"
