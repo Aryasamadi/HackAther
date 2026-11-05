@@ -20,6 +20,40 @@ from strix.tools.mcp import McpConnectionConfig
 
 
 logger = logging.getLogger(__name__)
+MAX_TELEGRAM_TEXT = 4000
+
+
+def _utf16_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _clip_utf16(value: str, limit: int) -> str:
+    result: list[str] = []
+    used = 0
+    for char in value:
+        units = 2 if ord(char) > 0xFFFF else 1
+        if used + units > limit:
+            break
+        result.append(char)
+        used += units
+    return "".join(result)
+
+
+def _split_utf16(value: str, limit: int = MAX_TELEGRAM_TEXT) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    used = 0
+    for char in value:
+        units = 2 if ord(char) > 0xFFFF else 1
+        if used + units > limit and current:
+            chunks.append("".join(current))
+            current = []
+            used = 0
+        current.append(char)
+        used += units
+    if current or not chunks:
+        chunks.append("".join(current))
+    return chunks
 
 
 def _h(value: object) -> str:
@@ -69,15 +103,17 @@ class ARESBot:
         self.telegram = TelegramAPI(config.telegram_token)
         self.adapter = StrixAdapter()
         self.monitor_task: asyncio.Task[None] | None = None
+        self.startup_task: asyncio.Task[None] | None = None
         self.chat_id: int | None = None
 
     async def close(self) -> None:
-        if self.monitor_task is not None:
-            self.monitor_task.cancel()
-            try:
-                await self.monitor_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self.startup_task, self.monitor_task):
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         await self.adapter.close()
         await self.telegram.close()
 
@@ -91,7 +127,7 @@ class ARESBot:
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
-            "text": text[:4000],
+            "text": text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
@@ -110,7 +146,7 @@ class ARESBot:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "text": text[:4000],
+            "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
@@ -166,9 +202,13 @@ class ARESBot:
             logger.debug("Could not answer callback query: %s", type(exc).__name__)
 
     async def send_long(self, chat_id: int, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> None:
-        chunks = [text[i : i + 3800] for i in range(0, len(text), 3800)] or ["(empty)"]
+        chunks = _split_utf16(text or "(empty)")
         for index, chunk in enumerate(chunks):
-            await self.send(chat_id, chunk, keyboard if index == len(chunks) - 1 else None)
+            await self.send(
+                chat_id,
+                html.escape(chunk),
+                keyboard if index == len(chunks) - 1 else None,
+            )
 
     def home_keyboard(self) -> list[list[dict[str, str]]]:
         return [
