@@ -2,8 +2,10 @@ import pytest
 
 from ares.providers import (
     build_model_reference,
+    model_button_label,
     model_endpoint_candidates,
     parse_provider_descriptor,
+    remove_provider,
     validate_base_url,
 )
 
@@ -46,3 +48,35 @@ def test_model_endpoint_candidates() -> None:
 def test_litellm_model_reference() -> None:
     assert build_model_reference("openrouter", "vendor/model-x") == "openrouter/vendor/model-x"
     assert build_model_reference("openrouter", "openrouter/vendor/model-x") == "openrouter/vendor/model-x"
+
+
+def test_model_button_label_hides_only_the_provider_route_prefix() -> None:
+    provider = {"name": "OpenRouter", "litellm_id": "openrouter"}
+    assert model_button_label(provider, "openrouter/anthropic/claude-sonnet") == (
+        "anthropic/claude-sonnet"
+    )
+    assert model_button_label(provider, "anthropic/claude-sonnet") == "anthropic/claude-sonnet"
+
+
+def test_remove_active_provider_clears_selection_and_preserves_other_providers() -> None:
+    state = {
+        "providers": {"one": {"api_key": "secret"}, "two": {"api_key": "other"}},
+        "active_provider_id": "one",
+        "active_model": "model-a",
+    }
+    assert remove_provider(state, "one") is True
+    assert state["providers"] == {"two": {"api_key": "other"}}
+    assert state["active_provider_id"] is None
+    assert state["active_model"] is None
+
+
+def test_remove_inactive_provider_preserves_active_selection() -> None:
+    state = {
+        "providers": {"one": {}, "two": {}},
+        "active_provider_id": "one",
+        "active_model": "model-a",
+    }
+    assert remove_provider(state, "two") is True
+    assert state["active_provider_id"] == "one"
+    assert state["active_model"] == "model-a"
+    assert remove_provider(state, "missing") is False
