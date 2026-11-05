@@ -1060,8 +1060,8 @@ class ARESBot:
                     raise ValueError("Provider was not found")
                 await self.render_menu(
                     chat_id,
-                    f"⚠️ <b>Remove provider?</b>\\n"
-                    f"Provider: <b>{_h(provider.get('name', provider_id))}</b>\\n"
+                    f"⚠️ <b>Remove provider?</b>\n"
+                    f"Provider: <b>{_h(provider.get('name', provider_id))}</b>\n"
                     "Its saved API token and model catalog will be removed. "
                     "A scan already running will continue with its loaded configuration.",
                     [[_button("🗑 Confirm removal", f"provider:delete:confirm:{provider_id}")],
