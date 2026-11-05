@@ -70,6 +70,8 @@ See docs/FEATURE_PARITY.md for the current capability-by-capability status and k
 
 GitHub-hosted runners are temporary and have a finite job lifetime. The runtime is deliberately bounded below the workflow timeout. Scheduled workflow runs provide the next worker session. Telegram update offsets and Provider/MCP records are encrypted and committed to .ares/state.enc; Strix run directories are archived with authenticated encryption into a workflow artifact before shutdown and restored by the next worker.
 
+The next worker searches completed runtime runs for the newest unexpired, non-empty history artifact. If earlier runtime runs exist but no usable snapshot can be recovered, startup is refused instead of silently presenting a blank history. This is file-backed history, not a separate database. An encrypted empty snapshot is also written on first boot, so a genuinely empty history is distinguishable from a missing backup.
+
 A scan that is still active during a worker handoff is stopped gracefully. Its Strix run data is carried into the next runner and can be resumed from Scan history when Strix marks it resumable. This is durable handoff, not a claim of a permanently running server: GitHub scheduling can be delayed and scheduled jobs can be dropped during heavy load.
 
 ## Security notes

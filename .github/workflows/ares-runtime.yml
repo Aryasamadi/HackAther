@@ -81,19 +81,68 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const runs = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: "ares-runtime.yml",
-              status: "completed",
-              per_page: 20
-            });
-            const previous = runs.data.workflow_runs.find((run) => run.id !== context.runId);
-            core.setOutput("run_id", previous ? String(previous.id) : "");
+            let selectedRun = null;
+            let hasPreviousRuntime = false;
+            const retentionCutoff = Date.now() - 31 * 24 * 60 * 60 * 1000;
+
+            for (let page = 1; page <= 20 && !selectedRun; page += 1) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: "ares-runtime.yml",
+                status: "completed",
+                per_page: 100,
+                page
+              });
+              const previousRuns = runs.data.workflow_runs
+                .filter((run) => run.id !== context.runId)
+                .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+
+              if (page === 1) hasPreviousRuntime = previousRuns.length > 0;
+
+              for (const run of previousRuns) {
+                const response = await github.rest.actions.listWorkflowRunArtifacts({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id,
+                  per_page: 100
+                });
+                const artifact = response.data.artifacts.find((item) =>
+                  item.name === "ares-strix-state" &&
+                  item.expired === false &&
+                  item.size_in_bytes > 0
+                );
+                if (artifact) {
+                  selectedRun = run;
+                  core.info(`Using encrypted Strix history from completed runtime ${run.id}.`);
+                  break;
+                }
+              }
+
+              const oldestRun = previousRuns[previousRuns.length - 1];
+              if (
+                previousRuns.length < 100 ||
+                !oldestRun ||
+                Date.parse(oldestRun.created_at) < retentionCutoff
+              ) {
+                break;
+              }
+            }
+
+            core.setOutput("has_previous_runtime", hasPreviousRuntime ? "true" : "false");
+            core.setOutput("run_id", selectedRun ? String(selectedRun.id) : "");
+            if (!selectedRun && hasPreviousRuntime) {
+              core.warning("Previous runtime runs exist, but none has a usable encrypted Strix history artifact.");
+            }
+
+      - name: Refuse to start without a recoverable history snapshot
+        if: steps.previous.outputs.has_previous_runtime == 'true' && steps.previous.outputs.run_id == ''
+        run: |
+          echo "::error::A previous ARES runtime exists, but no unexpired Strix history snapshot was found. Refusing to start with an empty history."
+          exit 1
 
       - name: Restore encrypted Strix run snapshot
         if: steps.previous.outputs.run_id != ''
-        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: ares-strix-state
@@ -101,6 +150,12 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           path: ares-state
+
+      - name: Validate restored Strix history snapshot
+        if: steps.previous.outputs.run_id != ''
+        shell: bash
+        run: |
+          test -s ares-state/strix-runs.enc || (echo "::error::The downloaded Strix history snapshot is missing or empty." && exit 1)
 
       - name: Set up Python
         uses: actions/setup-python@v5

@@ -822,23 +822,32 @@ class ARESBot:
         ]
 
     @staticmethod
-    def _live_visible_units(run_name: str, status: str, lines: list[str], part: int) -> int:
-        label = f"Strix live · {run_name}" + (f" · continuation {part}" if part > 1 else "")
-        visible = f"{label}\nStatus: {status}\n" + ("\n".join(lines) if lines else "Waiting for Strix activity…")
-        return _utf16_units(visible)
+    def _live_message_text(
+        _run_name: str, _status: str, lines: list[str], _part: int = 1
+    ) -> str:
+        """Render only readable text inside Telegram's expandable quote."""
+        body = "\n\n".join(line for line in lines if line)
+        body = _clip_utf16(body or "Waiting for assistant text…", MAX_TELEGRAM_TEXT)
+        return f"<blockquote expandable>{_h(body)}</blockquote>"
 
     @staticmethod
-    def _live_message_text(run_name: str, status: str, lines: list[str], part: int = 1) -> str:
-        label = f"Strix live · {run_name}" + (f" · continuation {part}" if part > 1 else "")
-        safe_status = _clip_utf16(str(status), 120)
-        prefix = f"{label}\nStatus: {safe_status}\n"
-        body = "\n".join(lines) if lines else "Waiting for Strix activity…"
-        body = _clip_utf16(body, max(0, MAX_TELEGRAM_TEXT - _utf16_units(prefix)))
-        return (
-            f"<b>{_h(label)}</b>\n"
-            f"Status: <b>{_h(safe_status)}</b>\n"
-            f"<blockquote expandable>{_h(body)}</blockquote>"
-        )
+    def _assistant_live_text(events: Any) -> str:
+        """Project only assistant chat content; omit tools and runtime metadata."""
+        if not isinstance(events, list):
+            return ""
+        messages: list[str] = []
+        for item in events:
+            if not isinstance(item, dict) or item.get("type") != "chat":
+                continue
+            payload = item.get("data")
+            if not isinstance(payload, dict) or payload.get("role") != "assistant":
+                continue
+            content = payload.get("content")
+            if isinstance(content, str):
+                content = content.replace("\x00", " ").strip()
+                if content:
+                    messages.append(content)
+        return "\n\n".join(messages)
 
     def _start_monitor(self, chat_id: int, message_id: int) -> None:
         if self.monitor_task is not None and not self.monitor_task.done():
@@ -863,117 +872,63 @@ class ARESBot:
         return False
 
     async def _monitor_scan(self, chat_id: int, message_id: int) -> None:
-        run_name = str(self.adapter.snapshot().get("run_name") or self.state.get("active_run") or "Strix")
-        part = 1
-        lines: list[str] = []
-        last_text = ""
-        seen_event_count = 0
-        agent_statuses: dict[str, str] = {}
-        last_summary: tuple[Any, ...] | None = None
+        run_name = str(
+            self.adapter.snapshot().get("run_name")
+            or self.state.get("active_run")
+            or "Strix"
+        )
+        message_ids = [message_id]
+        last_rendered: list[str] = []
         next_typing_at = 0.0
 
-        async def append_live_line(line: str, status: str) -> None:
-            nonlocal message_id, part, lines, last_text
-            line = _clip_utf16(line.replace("\x00", " "), 1100)
-            candidate = [*lines, line]
-            if lines and self._live_visible_units(run_name, status, candidate, part) > MAX_TELEGRAM_TEXT:
-                await self.edit(
-                    chat_id,
-                    message_id,
-                    self._live_message_text(run_name, status, lines, part),
-                )
-                part += 1
-                lines = [line]
-                next_text = self._live_message_text(run_name, status, lines, part)
-                sent = await self.send(chat_id, next_text)
-                next_id = sent.get("message_id")
-                if isinstance(next_id, int):
-                    message_id = next_id
-                last_text = next_text
-                return
-            lines = candidate
+        async def render_assistant_text(snapshot: dict[str, Any]) -> None:
+            transcript = self._assistant_live_text(snapshot.get("events", []))
+            if not transcript:
+                transcript = "Waiting for assistant text…"
+            chunks = _split_utf16(transcript, MAX_TELEGRAM_TEXT)
+            for index, chunk in enumerate(chunks):
+                rendered = self._live_message_text(run_name, "", [chunk], index + 1)
+                if index < len(message_ids):
+                    if index >= len(last_rendered) or last_rendered[index] != rendered:
+                        await self.edit(chat_id, message_ids[index], rendered)
+                    if index < len(last_rendered):
+                        last_rendered[index] = rendered
+                    else:
+                        last_rendered.append(rendered)
+                    continue
+                sent = await self.send(chat_id, rendered)
+                new_id = sent.get("message_id")
+                if not isinstance(new_id, int):
+                    break
+                message_ids.append(new_id)
+                last_rendered.append(rendered)
+
+            while len(message_ids) > len(chunks):
+                stale_id = message_ids.pop()
+                try:
+                    await self.telegram.call(
+                        "deleteMessage", {"chat_id": chat_id, "message_id": stale_id}
+                    )
+                except Exception as exc:
+                    logger.debug("Could not remove stale live transcript chunk: %s", type(exc).__name__)
+                if len(last_rendered) > len(chunks):
+                    last_rendered.pop()
 
         while self.adapter.running:
             snapshot = self.adapter.snapshot()
-            status = str(snapshot.get("status", "running"))
             now = time.monotonic()
             if self._has_active_agent(snapshot) and now >= next_typing_at:
                 try:
-                    await self.telegram.call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+                    await self.telegram.call(
+                        "sendChatAction", {"chat_id": chat_id, "action": "typing"}
+                    )
                 except Exception as exc:
                     logger.debug("Could not refresh Telegram typing indicator: %s", type(exc).__name__)
                 next_typing_at = now + 4.0
-
-            events = snapshot.get("events", [])
-            if not isinstance(events, list):
-                events = []
-            if len(events) < seen_event_count:
-                seen_event_count = 0
-            new_events = events[seen_event_count:]
-            seen_event_count = len(events)
-            for item in new_events:
-                if not isinstance(item, dict):
-                    continue
-                payload = item.get("data", {})
-                if not isinstance(payload, dict):
-                    payload = {}
-                content = payload.get("content") or payload.get("tool_name") or payload.get("output") or ""
-                if isinstance(content, (dict, list)):
-                    content = json.dumps(content, ensure_ascii=False)
-                agent = str(item.get("agent_id", "agent"))[:32]
-                event_type = str(item.get("type", "event"))[:32]
-                stamp = time.strftime("%H:%M:%S")
-                event_line = f"[{stamp}] {agent} · {event_type}"
-                if str(content).strip():
-                    event_line += f"\n{str(content).strip()}"
-                await append_live_line(event_line, status)
-
-            agents = snapshot.get("agents", [])
-            if isinstance(agents, list):
-                for agent in agents:
-                    if not isinstance(agent, dict):
-                        continue
-                    agent_id = str(agent.get("id", "agent"))
-                    agent_status = str(agent.get("status", "unknown"))
-                    if agent_statuses.get(agent_id) != agent_status:
-                        agent_statuses[agent_id] = agent_status
-                        stamp = time.strftime("%H:%M:%S")
-                        label = str(agent.get("name") or agent_id)[:50]
-                        await append_live_line(f"[{stamp}] Agent {label}: {agent_status}", status)
-
-            usage = snapshot.get("usage", {})
-            total_cost = usage.get("total_cost", usage.get("estimated_cost", "unknown")) if isinstance(usage, dict) else "unknown"
-            findings = snapshot.get("findings", [])
-            findings_count = len(findings) if isinstance(findings, list) else 0
-            summary = (
-                status,
-                len(agents) if isinstance(agents, list) else 0,
-                findings_count,
-                str(total_cost),
-                bool(snapshot.get("budget_paused", False)),
-            )
-            if summary != last_summary:
-                last_summary = summary
-                stamp = time.strftime("%H:%M:%S")
-                await append_live_line(
-                    f"[{stamp}] Status: {status} · Agents: {summary[1]} · Findings: {findings_count} · LLM usage: {total_cost}",
-                    status,
-                )
-            current_text = self._live_message_text(run_name, status, lines, part)
-            if current_text != last_text:
-                await self.edit(chat_id, message_id, current_text)
-                last_text = current_text
+            await render_assistant_text(snapshot)
             await asyncio.sleep(4)
 
-        snapshot = self.adapter.snapshot()
-        final_status = str(snapshot.get("status", "finished"))
-        if snapshot.get("error"):
-            final_line = f"Scan ended with error: {str(snapshot['error'])[:900]}"
-        else:
-            final_line = f"Scan finished · {final_status}"
-        await append_live_line(f"[{time.strftime('%H:%M:%S')}] {final_line}", final_status)
-        final_text = self._live_message_text(run_name, final_status, lines, part)
-        await self.edit(chat_id, message_id, final_text)
+        await render_assistant_text(self.adapter.snapshot())
 
     async def _show_agents(self, chat_id: int) -> None:
         agents = self.adapter.snapshot().get("agents", [])
@@ -1690,18 +1645,25 @@ async def async_main() -> None:
     try:
         await bot.run()
     finally:
-        await bot.close()
-        from ares.snapshot import create_snapshot
+        try:
+            await bot.close()
+        finally:
+            from ares.snapshot import create_snapshot
 
-        create_snapshot(
-            Path("strix_runs"),
-            snapshot_path,
-            bot_token=config.telegram_token,
-            repository=config.github_repository,
-            admin_id=config.admin_id,
-        )
-        await store.save(state)
-        await store.close()
+            try:
+                if create_snapshot(
+                    Path("strix_runs"),
+                    snapshot_path,
+                    bot_token=config.telegram_token,
+                    repository=config.github_repository,
+                    admin_id=config.admin_id,
+                ):
+                    logger.info("Encrypted Strix run history snapshot saved")
+            finally:
+                try:
+                    await store.save(state)
+                finally:
+                    await store.close()
 
 
 def main() -> None:

@@ -26,14 +26,32 @@ def test_split_utf16_keeps_chunks_within_telegram_limit() -> None:
     assert all(_utf16_units(chunk) <= MAX_TELEGRAM_TEXT for chunk in chunks)
 
 
-def test_live_message_uses_expandable_quote_and_respects_limit() -> None:
-    message = ARESBot._live_message_text("run-123", "running", ["🔍" * 6000])
+def test_live_message_shows_only_text_in_expandable_quote() -> None:
+    source = "Only the assistant's readable text. " + ("🔍" * 6000)
+    message = ARESBot._live_message_text("run-123", "running", [source])
     quote = re.search(r"<blockquote expandable>(.*?)</blockquote>", message)
 
     assert quote is not None
-    visible_body = html.unescape(quote.group(1))
-    visible = f"Strix live · run-123\nStatus: running\n{visible_body}"
+    visible = html.unescape(quote.group(1))
     assert _utf16_units(visible) <= MAX_TELEGRAM_TEXT
+    assert "run-123" not in message
+    assert "Status:" not in message
+    assert "running" not in message
+    assert visible.startswith("Only the assistant's readable text. ")
+
+
+def test_live_transcript_excludes_tool_events_and_user_messages() -> None:
+    events = [
+        {"type": "chat", "data": {"role": "assistant", "content": "Assistant text"}},
+        {"type": "tool", "data": {"tool_name": "browser.search", "args": {"q": "secret"}}},
+        {"type": "chat", "data": {"role": "user", "content": "User instruction"}},
+        {"type": "chat", "data": {"role": "assistant", "content": "Second assistant message"}},
+        {"type": "event", "data": {"content": "Status: running"}},
+    ]
+
+    assert ARESBot._assistant_live_text(events) == (
+        "Assistant text\n\nSecond assistant message"
+    )
 
 
 def test_budget_control_is_one_state_dependent_toggle() -> None:
