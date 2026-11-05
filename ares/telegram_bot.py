@@ -1394,11 +1394,12 @@ class ARESBot:
                 await self._show_agent_events(chat_id, parts[2])
             elif action == "finding" and len(parts) == 3 and parts[1] == "view":
                 await self._show_finding(chat_id, int(parts[2]))
-            elif data == "run:toggle_budget":
-                if self.adapter.snapshot().get("budget_paused", False):
+            elif data in {"run:toggle_budget", "run:pause", "run:resume_budget"}:
+                paused = bool(self.adapter.snapshot().get("budget_paused", False))
+                if data == "run:resume_budget" or (data == "run:toggle_budget" and paused):
                     await self.adapter.resume_budget()
                     notice = "▶️ Budget resumed."
-                else:
+                elif data == "run:pause" or (data == "run:toggle_budget" and not paused):
                     await self.adapter.pause_budget()
                     notice = "⏸ Budget pause requested."
                 await self.render_menu(chat_id, notice, self._run_keyboard())
@@ -1429,8 +1430,8 @@ class ARESBot:
                 self.state["pending_history_delete"] = run_name
                 await self.render_menu(
                     chat_id,
-                    f"⚠️ <b>Delete this scan history?</b>\\n"
-                    f"Run: <code>{_h(run_name)}</code>\\n"
+                    f"⚠️ <b>Delete this scan history?</b>\n"
+                    f"Run: <code>{_h(run_name)}</code>\n"
                     "Only this run's files will be deleted. The encrypted ARES state and other runs will remain untouched.",
                     [[_button("🗑 Confirm delete", "history:delete:confirm")],
                      [_button("Cancel", "history:delete:cancel")]],
