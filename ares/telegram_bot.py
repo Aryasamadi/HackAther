@@ -172,8 +172,8 @@ class ARESBot:
 
     def home_keyboard(self) -> list[list[dict[str, str]]]:
         return [
-            [_button("🚀 New scan", "scan:new"), _button("🧠 Models", "models:list")],
-            [_button("📡 Live control", "run:dashboard"), _button("📚 Scan history", "runs:list")],
+            [_button("🚀 New scan", "scan:new"), _button("📡 Live control", "run:dashboard")],
+            [_button("🧠 Models", "models:list"), _button("📚 Scan history", "runs:list")],
             [_button("⚙️ Settings", "settings:show"), _button("🔌 MCP servers", "mcp:list")],
             [_button("ℹ️ Engine info", "engine:info")],
         ]
@@ -271,7 +271,23 @@ class ARESBot:
             rows,
         )
 
-    async def _provider_models(self, chat_id: int, provider_id: str, page: int = 0) -> None:
+    async def _refresh_provider_catalog(self, provider_id: str) -> int:
+        providers = self.state.get("providers", {})
+        provider = providers.get(provider_id) if isinstance(providers, dict) else None
+        if not isinstance(provider, dict):
+            raise ValueError("Provider was not found")
+        models = await discover_models(str(provider["base_url"]), str(provider["api_key"]))
+        provider["models"] = models
+        return len(models)
+
+    async def _provider_models(
+        self,
+        chat_id: int,
+        provider_id: str,
+        page: int = 0,
+        *,
+        notice: str | None = None,
+    ) -> None:
         provider = self.state.get("providers", {}).get(provider_id)
         if not isinstance(provider, dict):
             await self.render_menu(chat_id, "Provider not found.", [[_button("⬅️ Models", "models:list")]])
@@ -299,19 +315,19 @@ class ARESBot:
             navigation.append(_button("Next ➡️", f"model:page:{provider_id}:{page + 1}"))
         if navigation:
             rows.append(navigation)
-        rows.append([_button("🔄 Refresh models", f"provider:refresh:{provider_id}")])
         rows.append([_button("🗑 Remove provider", f"provider:delete:{provider_id}")])
         rows.append([_button("⬅️ Providers", "models:list"), _button("Main menu", "menu:home")])
         active = self.state.get("active_model")
         model_range = f"{start + 1}–{start + len(visible)} of {len(models)}" if models else "No models discovered"
-        await self.render_menu(
-            chat_id,
+        menu_text = (
             f"<b>{_h(provider.get('name', provider_id))}</b>\n"
             f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
             f"Active model: <code>{_h(active or 'none')}</code>\n\n"
-            "Choose a model or refresh the provider catalog.",
-            rows,
+            "Choose a model. The catalog refreshes automatically whenever you open this provider."
         )
+        if notice:
+            menu_text = f"{_h(notice)}\n\n" + menu_text
+        await self.render_menu(chat_id, menu_text, rows)
 
     async def _begin_provider(self, chat_id: int) -> None:
         self.state["pending"] = {"kind": "provider", "step": "name"}
@@ -1045,14 +1061,25 @@ class ARESBot:
                 else:
                     raise ValueError("Unknown provider setup step")
             elif action == "provider" and len(parts) == 3 and parts[1] == "refresh":
-                provider = self.state.get("providers", {}).get(parts[2])
-                if not isinstance(provider, dict):
-                    raise ValueError("Provider was not found")
-                models = await discover_models(str(provider["base_url"]), str(provider["api_key"]))
-                provider["models"] = models
+                await self._refresh_provider_catalog(parts[2])
                 await self._provider_models(chat_id, parts[2], 0)
             elif action == "provider" and len(parts) == 3 and parts[1] == "view":
-                await self._provider_models(chat_id, parts[2], 0)
+                try:
+                    await self._refresh_provider_catalog(parts[2])
+                except Exception as exc:
+                    logger.warning(
+                        "Provider model refresh failed for %s: %s",
+                        parts[2],
+                        type(exc).__name__,
+                    )
+                    await self._provider_models(
+                        chat_id,
+                        parts[2],
+                        0,
+                        notice="⚠️ Could not refresh the catalog; showing saved models.",
+                    )
+                else:
+                    await self._provider_models(chat_id, parts[2], 0)
             elif action == "provider" and len(parts) == 3 and parts[1] == "delete":
                 provider_id = parts[2]
                 provider = self.state.get("providers", {}).get(provider_id)
