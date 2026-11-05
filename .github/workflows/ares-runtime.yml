@@ -179,6 +179,8 @@ jobs:
           test -n "$GITHUB_TOKEN" || (echo "GitHub Actions token is unavailable" && exit 1)
 
       - name: Run ARES Telegram interface
+        env:
+          ARES_PREVIOUS_RUNTIME_EXISTS: ${{ steps.previous.outputs.has_previous_runtime }}
         run: python -m ares
 
       - name: Save encrypted Strix run state
