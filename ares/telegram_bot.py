@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -1853,6 +1854,15 @@ async def async_main() -> None:
         if restored:
             logger.info("Restored Strix history from the legacy Actions artifact")
         else:
+            previous_runtime_exists = (
+                os.environ.get("ARES_PREVIOUS_RUNTIME_EXISTS", "false").lower() == "true"
+            )
+            if previous_runtime_exists:
+                raise RuntimeError(
+                    "Previous ARES runtime history exists, but neither durable repository "
+                    "storage nor a valid legacy Actions artifact could be restored. "
+                    "Refusing to start with an empty history."
+                )
             logger.info("No previous Strix history exists; starting with an empty history")
 
     store = StateStore(
