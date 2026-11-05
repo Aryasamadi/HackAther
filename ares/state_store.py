@@ -102,6 +102,21 @@ class StateStore:
                 encoded = remote.get("content", "")
                 if encoded:
                     encrypted = base64.b64decode(encoded)
+                    # Some GitHub Contents API responses for binary blobs may
+                    # not preserve the base64 representation consistently.
+                    # Retry through the raw media type before treating a
+                    # persisted encrypted state as corrupt.
+                    if not encrypted.startswith(b"ARES1"):
+                        raw_headers = self._headers()
+                        raw_headers["Accept"] = "application/vnd.github.raw"
+                        raw_response = await self._client.get(
+                            self._contents_url(),
+                            headers=raw_headers,
+                            params={"ref": self.branch},
+                        )
+                        raw_response.raise_for_status()
+                        if raw_response.content.startswith(b"ARES1"):
+                            encrypted = raw_response.content
             elif response.status_code != 404:
                 response.raise_for_status()
         if encrypted is None and self.local_path.is_file():
