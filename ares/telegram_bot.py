@@ -642,18 +642,63 @@ class ARESBot:
         if provider is None or not isinstance(model, str) or not model:
             await self.render_menu(chat_id, "Select a Provider and model first.", self.home_keyboard())
             return
+        if self.adapter.running or (self.startup_task is not None and not self.startup_task.done()):
+            await self.render_menu(chat_id, "A Strix scan is already running or initializing.", self._run_keyboard())
+            return
+
+        settings = self.state.get("settings", {})
+        if not isinstance(settings, dict):
+            settings = {}
+        await self.render_menu(
+            chat_id,
+            "<b>Strix scan initialization</b>\nPreparing the runtime. Live activity will appear in a separate message.",
+            self._run_keyboard(),
+        )
+        live_message = await self.send(
+            chat_id,
+            self._live_message_text("pending", "Preparing", ["Checking model connection and preparing the scan…"]),
+        )
+        live_message_id = live_message.get("message_id")
+        if not isinstance(live_message_id, int):
+            await self.render_menu(chat_id, "Could not create the live activity message.", self.home_keyboard())
+            return
+        self.startup_task = asyncio.create_task(
+            self._launch_scan_background(
+                chat_id,
+                live_message_id,
+                targets,
+                instruction,
+                workspace_files or [],
+                provider,
+                model,
+                dict(settings),
+            ),
+            name="ares-scan-start",
+        )
+
+    async def _launch_scan_background(
+        self,
+        chat_id: int,
+        message_id: int,
+        targets: list[str],
+        instruction: str,
+        workspace_files: list[str],
+        provider: dict[str, Any],
+        model: str,
+        settings: dict[str, Any],
+    ) -> None:
         try:
             run_name = await self.adapter.start(
                 targets=targets,
                 instruction=instruction,
                 provider=provider,
                 model=model,
-                scan_mode=str(self.state.get("settings", {}).get("scan_mode", "deep")),
-                scope_mode=str(self.state.get("settings", {}).get("scope_mode", "auto")),
-                diff_base=self.state.get("settings", {}).get("diff_base"),
-                max_budget_usd=self.state.get("settings", {}).get("max_budget_usd"),
-                max_turns=int(self.state.get("settings", {}).get("max_turns", 500)),
-                workspace_files=workspace_files or [],
+                scan_mode=str(settings.get("scan_mode", "deep")),
+                scope_mode=str(settings.get("scope_mode", "auto")),
+                diff_base=settings.get("diff_base"),
+                max_budget_usd=settings.get("max_budget_usd"),
+                max_turns=int(settings.get("max_turns", 500)),
+                workspace_files=workspace_files,
                 mcp_servers=self.state.get("mcp_servers", []),
                 mcp_only=self.state.get("mcp_only", []),
                 mcp_exclude=self.state.get("mcp_exclude", []),
@@ -661,20 +706,27 @@ class ARESBot:
             self.state["active_run"] = run_name
             await self.render_menu(
                 chat_id,
-                f"🚀 <b>Strix scan started</b>\nRun: <code>{_h(run_name)}</code>\n"
-                f"Targets: <b>{len(targets)}</b>\nMode: <b>{_h(self.state['settings']['scan_mode'])}</b>",
+                f"<b>Strix live control</b>\nRun: <code>{_h(run_name)}</code>\nStatus: <b>running</b>",
                 self._run_keyboard(),
             )
-            message_id = self.state.get("ui_message_id")
-            if isinstance(message_id, int):
-                self._start_monitor(chat_id, message_id)
+            self._start_monitor(chat_id, message_id)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.exception("Could not start Strix scan")
+            await self.edit(
+                chat_id,
+                message_id,
+                self._live_message_text("startup", "Failed", [str(exc)[:1200]]),
+            )
             await self.render_menu(
                 chat_id,
                 f"⚠️ Scan could not start:\n<code>{_h(str(exc)[:900])}</code>",
                 self.home_keyboard(),
             )
+        finally:
+            if self.startup_task is asyncio.current_task():
+                self.startup_task = None
 
     async def _resume_scan(self, chat_id: int, run_name: str) -> None:
         provider = self._active_provider()
@@ -682,13 +734,49 @@ class ARESBot:
         if provider is None or not isinstance(model, str) or not model:
             await self.render_menu(chat_id, "Select a Provider and model first.", self.home_keyboard())
             return
+        if self.adapter.running or (self.startup_task is not None and not self.startup_task.done()):
+            await self.render_menu(chat_id, "A Strix scan is already running or initializing.", self._run_keyboard())
+            return
+
+        settings = self.state.get("settings", {})
+        if not isinstance(settings, dict):
+            settings = {}
+        await self.render_menu(
+            chat_id,
+            f"<b>Resuming Strix run</b>\n<code>{_h(run_name)}</code>\nPreparing the runtime…",
+            self._run_keyboard(),
+        )
+        live_message = await self.send(
+            chat_id,
+            self._live_message_text(run_name, "Resuming", ["Loading the saved Strix run…"]),
+        )
+        message_id = live_message.get("message_id")
+        if not isinstance(message_id, int):
+            await self.render_menu(chat_id, "Could not create the live activity message.", self.home_keyboard())
+            return
+        self.startup_task = asyncio.create_task(
+            self._resume_scan_background(
+                chat_id, message_id, run_name, provider, model, dict(settings)
+            ),
+            name="ares-scan-resume",
+        )
+
+    async def _resume_scan_background(
+        self,
+        chat_id: int,
+        message_id: int,
+        run_name: str,
+        provider: dict[str, Any],
+        model: str,
+        settings: dict[str, Any],
+    ) -> None:
         try:
             name = await self.adapter.resume(
                 run_name=run_name,
                 provider=provider,
                 model=model,
-                max_budget_usd=self.state.get("settings", {}).get("max_budget_usd"),
-                max_turns=int(self.state.get("settings", {}).get("max_turns", 500)),
+                max_budget_usd=settings.get("max_budget_usd"),
+                max_turns=int(settings.get("max_turns", 500)),
                 mcp_servers=self.state.get("mcp_servers", []),
                 mcp_only=self.state.get("mcp_only", []),
                 mcp_exclude=self.state.get("mcp_exclude", []),
@@ -696,31 +784,64 @@ class ARESBot:
             self.state["active_run"] = name
             await self.render_menu(
                 chat_id,
-                f"▶️ Resumed Strix run <code>{_h(name)}</code>.",
+                f"<b>Strix live control</b>\nRun: <code>{_h(name)}</code>\nStatus: <b>running</b>",
                 self._run_keyboard(),
             )
-            message_id = self.state.get("ui_message_id")
-            if isinstance(message_id, int):
-                self._start_monitor(chat_id, message_id)
+            self._start_monitor(chat_id, message_id)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
+            logger.exception("Could not resume Strix scan")
+            await self.edit(
+                chat_id,
+                message_id,
+                self._live_message_text(run_name, "Resume failed", [str(exc)[:1200]]),
+            )
             await self.render_menu(
                 chat_id,
                 f"⚠️ Resume failed:\n<code>{_h(str(exc)[:900])}</code>",
                 self.home_keyboard(),
             )
+        finally:
+            if self.startup_task is asyncio.current_task():
+                self.startup_task = None
 
     def _run_keyboard(self) -> list[list[dict[str, str]]]:
+        paused = bool(self.adapter.snapshot().get("budget_paused", False))
+        budget_button = _button(
+            "▶️ Resume budget" if paused else "⏸ Pause budget",
+            "run:toggle_budget",
+        )
         return [
             [_button("🤖 Agents", "run:agents"), _button("🔎 Findings", "run:findings")],
             [_button("🧾 Events", "run:events"), _button("🔌 MCP status", "mcp:status")],
-            [_button("⏸ Pause budget", "run:pause"), _button("▶️ Resume budget", "run:resume_budget")],
+            [budget_button],
             [_button("🛑 Stop scan", "run:stop"), _button("📄 Report", "run:report")],
             [_button("🌐 Strix Viewer", "run:viewer")],
             [_button("⬅️ Main menu", "menu:home")],
         ]
 
+    @staticmethod
+    def _live_visible_units(run_name: str, status: str, lines: list[str], part: int) -> int:
+        label = f"Strix live · {run_name}" + (f" · continuation {part}" if part > 1 else "")
+        visible = f"{label}\nStatus: {status}\n" + ("\n".join(lines) if lines else "Waiting for Strix activity…")
+        return _utf16_units(visible)
+
+    @staticmethod
+    def _live_message_text(run_name: str, status: str, lines: list[str], part: int = 1) -> str:
+        label = f"Strix live · {run_name}" + (f" · continuation {part}" if part > 1 else "")
+        safe_status = _clip_utf16(str(status), 120)
+        prefix = f"{label}\nStatus: {safe_status}\n"
+        body = "\n".join(lines) if lines else "Waiting for Strix activity…"
+        body = _clip_utf16(body, max(0, MAX_TELEGRAM_TEXT - _utf16_units(prefix)))
+        return (
+            f"<b>{_h(label)}</b>\n"
+            f"Status: <b>{_h(safe_status)}</b>\n"
+            f"<blockquote expandable>{_h(body)}</blockquote>"
+        )
+
     def _start_monitor(self, chat_id: int, message_id: int) -> None:
-        if self.monitor_task is not None:
+        if self.monitor_task is not None and not self.monitor_task.done():
             self.monitor_task.cancel()
         self.monitor_task = asyncio.create_task(self._monitor_scan(chat_id, message_id))
 
@@ -742,46 +863,117 @@ class ARESBot:
         return False
 
     async def _monitor_scan(self, chat_id: int, message_id: int) -> None:
-        last_status = ""
+        run_name = str(self.adapter.snapshot().get("run_name") or self.state.get("active_run") or "Strix")
+        part = 1
+        lines: list[str] = []
+        last_text = ""
+        seen_event_count = 0
+        agent_statuses: dict[str, str] = {}
+        last_summary: tuple[Any, ...] | None = None
         next_typing_at = 0.0
+
+        async def append_live_line(line: str, status: str) -> None:
+            nonlocal message_id, part, lines, last_text
+            line = _clip_utf16(line.replace("\x00", " "), 1100)
+            candidate = [*lines, line]
+            if lines and self._live_visible_units(run_name, status, candidate, part) > MAX_TELEGRAM_TEXT:
+                await self.edit(
+                    chat_id,
+                    message_id,
+                    self._live_message_text(run_name, status, lines, part),
+                )
+                part += 1
+                lines = [line]
+                next_text = self._live_message_text(run_name, status, lines, part)
+                sent = await self.send(chat_id, next_text)
+                next_id = sent.get("message_id")
+                if isinstance(next_id, int):
+                    message_id = next_id
+                last_text = next_text
+                return
+            lines = candidate
+
         while self.adapter.running:
             snapshot = self.adapter.snapshot()
+            status = str(snapshot.get("status", "running"))
             now = time.monotonic()
             if self._has_active_agent(snapshot) and now >= next_typing_at:
                 try:
-                    # Telegram's typing action expires after a few seconds, so
-                    # refresh it while at least one Strix agent is actively working.
-                    await self.telegram.call(
-                        "sendChatAction", {"chat_id": chat_id, "action": "typing"}
-                    )
+                    await self.telegram.call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
                 except Exception as exc:
                     logger.debug("Could not refresh Telegram typing indicator: %s", type(exc).__name__)
                 next_typing_at = now + 4.0
 
+            events = snapshot.get("events", [])
+            if not isinstance(events, list):
+                events = []
+            if len(events) < seen_event_count:
+                seen_event_count = 0
+            new_events = events[seen_event_count:]
+            seen_event_count = len(events)
+            for item in new_events:
+                if not isinstance(item, dict):
+                    continue
+                payload = item.get("data", {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                content = payload.get("content") or payload.get("tool_name") or payload.get("output") or ""
+                if isinstance(content, (dict, list)):
+                    content = json.dumps(content, ensure_ascii=False)
+                agent = str(item.get("agent_id", "agent"))[:32]
+                event_type = str(item.get("type", "event"))[:32]
+                stamp = time.strftime("%H:%M:%S")
+                event_line = f"[{stamp}] {agent} · {event_type}"
+                if str(content).strip():
+                    event_line += f"\n{str(content).strip()}"
+                await append_live_line(event_line, status)
+
             agents = snapshot.get("agents", [])
-            findings = snapshot.get("findings", [])
+            if isinstance(agents, list):
+                for agent in agents:
+                    if not isinstance(agent, dict):
+                        continue
+                    agent_id = str(agent.get("id", "agent"))
+                    agent_status = str(agent.get("status", "unknown"))
+                    if agent_statuses.get(agent_id) != agent_status:
+                        agent_statuses[agent_id] = agent_status
+                        stamp = time.strftime("%H:%M:%S")
+                        label = str(agent.get("name") or agent_id)[:50]
+                        await append_live_line(f"[{stamp}] Agent {label}: {agent_status}", status)
+
             usage = snapshot.get("usage", {})
             total_cost = usage.get("total_cost", usage.get("estimated_cost", "unknown")) if isinstance(usage, dict) else "unknown"
-            text = (
-                f"<b>Strix · {_h(snapshot.get('run_name'))}</b>\n"
-                f"Status: <b>{_h(snapshot.get('status'))}</b>\n"
-                f"Agents: <b>{len(agents)}</b> · Findings: <b>{len(findings)}</b>\n"
-                f"LLM usage: <code>{_h(total_cost)}</code>"
+            findings = snapshot.get("findings", [])
+            findings_count = len(findings) if isinstance(findings, list) else 0
+            summary = (
+                status,
+                len(agents) if isinstance(agents, list) else 0,
+                findings_count,
+                str(total_cost),
+                bool(snapshot.get("budget_paused", False)),
             )
-            if text != last_status:
-                await self.edit(chat_id, message_id, text, self._run_keyboard())
-                last_status = text
+            if summary != last_summary:
+                last_summary = summary
+                stamp = time.strftime("%H:%M:%S")
+                await append_live_line(
+                    f"[{stamp}] Status: {status} · Agents: {summary[1]} · Findings: {findings_count} · LLM usage: {total_cost}",
+                    status,
+                )
+            current_text = self._live_message_text(run_name, status, lines, part)
+            if current_text != last_text:
+                await self.edit(chat_id, message_id, current_text)
+                last_text = current_text
             await asyncio.sleep(4)
+
         snapshot = self.adapter.snapshot()
-        final_text = (
-            f"<b>Strix run finished · {_h(snapshot.get('run_name'))}</b>\n"
-            f"Status: <b>{_h(snapshot.get('status'))}</b>\n"
-            f"Agents: <b>{len(snapshot.get('agents', []))}</b> · "
-            f"Findings: <b>{len(snapshot.get('findings', []))}</b>"
-        )
+        final_status = str(snapshot.get("status", "finished"))
         if snapshot.get("error"):
-            final_text += f"\nError: <code>{_h(snapshot['error'])}</code>"
-        await self.edit(chat_id, message_id, final_text, self._run_keyboard())
+            final_line = f"Scan ended with error: {str(snapshot['error'])[:900]}"
+        else:
+            final_line = f"Scan finished · {final_status}"
+        await append_live_line(f"[{time.strftime('%H:%M:%S')}] {final_line}", final_status)
+        final_text = self._live_message_text(run_name, final_status, lines, part)
+        await self.edit(chat_id, message_id, final_text)
 
     async def _show_agents(self, chat_id: int) -> None:
         agents = self.adapter.snapshot().get("agents", [])
