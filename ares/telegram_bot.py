@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from ares.config import Config
-from ares.providers import discover_models, new_provider
+from ares.providers import discover_models, model_button_label, new_provider, remove_provider
 from ares.snapshot import restore_snapshot
 from ares.state_store import StateStore
 from ares.strix_adapter import StrixAdapter
@@ -289,9 +289,7 @@ class ARESBot:
             row = []
             for local_index, model in enumerate(visible[index : index + 2], start=index):
                 model_index = start + local_index
-                label = str(model)
-                if len(label) > 28:
-                    label = label[:25] + "…"
+                label = model_button_label(provider, model)
                 row.append(_button(label, f"model:select:{provider_id}:{model_index}"))
             rows.append(row)
         navigation: list[dict[str, str]] = []
@@ -302,6 +300,7 @@ class ARESBot:
         if navigation:
             rows.append(navigation)
         rows.append([_button("🔄 Refresh models", f"provider:refresh:{provider_id}")])
+        rows.append([_button("🗑 Remove provider", f"provider:delete:{provider_id}")])
         rows.append([_button("⬅️ Providers", "models:list"), _button("Main menu", "menu:home")])
         active = self.state.get("active_model")
         model_range = f"{start + 1}–{start + len(visible)} of {len(models)}" if models else "No models discovered"
@@ -664,10 +663,40 @@ class ARESBot:
             self.monitor_task.cancel()
         self.monitor_task = asyncio.create_task(self._monitor_scan(chat_id, message_id))
 
+    @staticmethod
+    def _has_active_agent(snapshot: dict[str, Any]) -> bool:
+        agents = snapshot.get("agents", [])
+        if not isinstance(agents, list):
+            return False
+        active_statuses = {
+            "active", "running", "working", "thinking", "executing",
+            "streaming", "in_progress", "tool_running", "starting", "initializing",
+        }
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            status = str(agent.get("status", "")).casefold().rsplit(".", 1)[-1]
+            if status in active_statuses:
+                return True
+        return False
+
     async def _monitor_scan(self, chat_id: int, message_id: int) -> None:
         last_status = ""
+        next_typing_at = 0.0
         while self.adapter.running:
             snapshot = self.adapter.snapshot()
+            now = time.monotonic()
+            if self._has_active_agent(snapshot) and now >= next_typing_at:
+                try:
+                    # Telegram's typing action expires after a few seconds, so
+                    # refresh it while at least one Strix agent is actively working.
+                    await self.telegram.call(
+                        "sendChatAction", {"chat_id": chat_id, "action": "typing"}
+                    )
+                except Exception as exc:
+                    logger.debug("Could not refresh Telegram typing indicator: %s", type(exc).__name__)
+                next_typing_at = now + 4.0
+
             agents = snapshot.get("agents", [])
             findings = snapshot.get("findings", [])
             usage = snapshot.get("usage", {})
@@ -681,7 +710,7 @@ class ARESBot:
             if text != last_status:
                 await self.edit(chat_id, message_id, text, self._run_keyboard())
                 last_status = text
-            await asyncio.sleep(20)
+            await asyncio.sleep(4)
         snapshot = self.adapter.snapshot()
         final_text = (
             f"<b>Strix run finished · {_h(snapshot.get('run_name'))}</b>\n"
@@ -1024,6 +1053,28 @@ class ARESBot:
                 await self._provider_models(chat_id, parts[2], 0)
             elif action == "provider" and len(parts) == 3 and parts[1] == "view":
                 await self._provider_models(chat_id, parts[2], 0)
+            elif action == "provider" and len(parts) == 3 and parts[1] == "delete":
+                provider_id = parts[2]
+                provider = self.state.get("providers", {}).get(provider_id)
+                if not isinstance(provider, dict):
+                    raise ValueError("Provider was not found")
+                await self.render_menu(
+                    chat_id,
+                    f"⚠️ <b>Remove provider?</b>\\n"
+                    f"Provider: <b>{_h(provider.get('name', provider_id))}</b>\\n"
+                    "Its saved API token and model catalog will be removed. "
+                    "A scan already running will continue with its loaded configuration.",
+                    [[_button("🗑 Confirm removal", f"provider:delete:confirm:{provider_id}")],
+                     [_button("Cancel", f"provider:view:{provider_id}")]],
+                )
+            elif (
+                action == "provider" and len(parts) == 4
+                and parts[1] == "delete" and parts[2] == "confirm"
+            ):
+                provider_id = parts[3]
+                if not remove_provider(self.state, provider_id):
+                    raise ValueError("Provider was already removed or no longer exists")
+                await self._models_menu(chat_id)
             elif action == "model" and len(parts) == 4 and parts[1] == "page":
                 await self._provider_models(chat_id, parts[2], int(parts[3]))
             elif action == "model" and len(parts) == 4 and parts[1] == "select":
