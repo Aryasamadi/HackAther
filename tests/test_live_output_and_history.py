@@ -76,6 +76,34 @@ def test_budget_control_is_one_state_dependent_toggle() -> None:
     assert callbacks == ["run:toggle_budget"]
 
 
+def test_agent_detail_displays_escaped_failure_reason() -> None:
+    bot = object.__new__(ARESBot)
+    bot.adapter = SimpleNamespace(
+        snapshot=lambda: {
+            "agents": [
+                {
+                    "id": "agent-123",
+                    "name": "Recon Agent",
+                    "status": "failed",
+                    "parent_id": "root",
+                    "error_message": "Provider returned <html>401 Unauthorized</html>",
+                }
+            ]
+        }
+    )
+    bot.render_menu = AsyncMock()
+
+    asyncio.run(bot._show_agent(42, "agent-123"))
+
+    bot.render_menu.assert_awaited_once()
+    chat_id, message_text, _keyboard = bot.render_menu.await_args.args
+    assert chat_id == 42
+    assert "Failure reason" in message_text
+    assert "401 Unauthorized" in message_text
+    assert "&lt;html&gt;" in message_text
+    assert "<html>" not in message_text
+
+
 def test_findings_are_sent_as_standalone_message_with_detail_buttons() -> None:
     bot = object.__new__(ARESBot)
     bot.adapter = SimpleNamespace(

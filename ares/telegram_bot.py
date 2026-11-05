@@ -952,11 +952,24 @@ class ARESBot:
         if not agent:
             await self.render_menu(chat_id, "Agent not found.", [[_button("⬅️ Agents", "run:agents")]])
             return
+        status = str(agent.get("status") or "unknown")
+        error_message = agent.get("error_message") or agent.get("error")
+        error_section = ""
+        if isinstance(error_message, str) and error_message.strip():
+            safe_error = _clip_utf16(
+                error_message.replace("\x00", " ").strip(),
+                700,
+            )
+            error_section = (
+                "\n\n<b>Failure reason</b>\n"
+                f"<pre>{_h(safe_error)}</pre>"
+            )
         text = (
             f"<b>{_h(agent.get('name', agent_id))}</b>\n"
             f"ID: <code>{_h(agent_id)}</code>\n"
-            f"Status: <b>{_h(agent.get('status'))}</b>\n"
+            f"Status: <b>{_h(status)}</b>\n"
             f"Parent: <code>{_h(agent.get('parent_id') or 'root')}</code>"
+            f"{error_section}"
         )
         await self.render_menu(
             chat_id,
