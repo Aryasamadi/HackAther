@@ -29,6 +29,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "mcp_only": [],
     "mcp_exclude": [],
     "active_run": None,
+    "scan_control": None,
 }
 
 
