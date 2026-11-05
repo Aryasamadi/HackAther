@@ -1012,28 +1012,35 @@ class ARESBot:
              [_button("⬅️ Agents", "run:agents")]],
         )
 
-    async def _show_findings(self, chat_id: int) -> None:
+    async def _show_findings(self, chat_id: int) -> bool:
         findings = self.adapter.snapshot().get("findings", [])
-        if not findings:
-            await self.render_menu(chat_id, "No findings have been recorded yet.", self._run_keyboard())
-            return
-        rows: list[list[dict[str, str]]] = []
-        lines = ["<b>Strix findings</b>", f"Total: <b>{len(findings)}</b>"]
-        for index, item in enumerate(findings[:20]):
+        if not isinstance(findings, list) or not findings:
+            return False
+        lines = ["Strix findings", f"Total: {len(findings)}"]
+        for index, item in enumerate(findings[:40], start=1):
+            if not isinstance(item, dict):
+                continue
             title = str(item.get("title", "Untitled finding"))
             severity = str(item.get("severity", "unknown")).upper()
-            rows.append([_button(f"{severity} · {title}"[:60], f"finding:view:{index}")])
-        rows.append([_button("⬅️ Run controls", "run:dashboard")])
-        await self.render_menu(chat_id, "\n".join(lines), rows)
+            target = str(item.get("target") or "not specified")
+            endpoint = str(item.get("endpoint") or "not specified")
+            lines.append(
+                f"{index}. [{severity}] {title}\n"
+                f"Target: {target}\nEndpoint: {endpoint}"
+            )
+        await self.send_long(chat_id, "\n\n".join(lines))
+        return True
 
     async def _show_events(self, chat_id: int) -> None:
         events = self.adapter.snapshot().get("events", [])
-        if not events:
-            await self.render_menu(chat_id, "No Strix events have been recorded yet.", self._run_keyboard())
+        if not isinstance(events, list) or not events:
+            await self.send_long(chat_id, "Recent Strix events\nNo Strix events have been recorded yet.")
             return
-        lines = ["<b>Recent Strix events</b>"]
+        lines = ["Recent Strix events"]
         for item in events[-12:]:
-            agent = str(item.get("agent_id", "agent"))
+            if not isinstance(item, dict):
+                continue
+            agent = str(item.get("agent_id", "agent"))[:12]
             payload = item.get("data", {})
             if not isinstance(payload, dict):
                 payload = {}
@@ -1041,35 +1048,32 @@ class ARESBot:
             if isinstance(content, (dict, list)):
                 content = json.dumps(content, ensure_ascii=False)
             lines.append(
-                f"• <code>{_h(agent[:12])}</code> · <b>{_h(item.get('type', 'event'))}</b>\n"
-                f"{_h(str(content)[:160])}"
+                f"• {agent} · {item.get('type', 'event')}\n{str(content)[:700]}"
             )
-        await self.render_menu(chat_id, "\n\n".join(lines), self._run_keyboard())
+        await self.send_long(chat_id, "\n\n".join(lines))
 
     async def _show_agent_events(self, chat_id: int, agent_id: str) -> None:
         events = self.adapter.events_for_agent(agent_id)
         if not events:
-            await self.render_menu(chat_id, "No transcript/events are available for this agent.", [[_button("⬅️ Agent", f"agent:view:{agent_id}")]])
+            await self.send_long(chat_id, f"Agent events · {agent_id}\nNo transcript/events are available.")
             return
-        lines = [f"<b>Agent events · {_h(agent_id)}</b>"]
+        lines = [f"Agent events · {agent_id}"]
         for item in events[-8:]:
+            if not isinstance(item, dict):
+                continue
             payload = item.get("data", {})
             if not isinstance(payload, dict):
                 payload = {}
             content = payload.get("content") or payload.get("tool_name") or payload.get("output") or ""
             if isinstance(content, (dict, list)):
                 content = json.dumps(content, ensure_ascii=False)
-            lines.append(f"<b>{_h(item.get('type', 'event'))}</b>\n{_h(str(content)[:250])}")
-        await self.render_menu(
-            chat_id,
-            "\n\n".join(lines),
-            [[_button("⬅️ Agent", f"agent:view:{agent_id}")]],
-        )
+            lines.append(f"{item.get('type', 'event')}\n{str(content)[:900]}")
+        await self.send_long(chat_id, "\n\n".join(lines))
 
     async def _show_finding(self, chat_id: int, index: int) -> None:
         findings = self.adapter.snapshot().get("findings", [])
-        if not 0 <= index < len(findings):
-            await self.render_menu(chat_id, "Finding not found.", [[_button("⬅️ Findings", "run:findings")]])
+        if not isinstance(findings, list) or not 0 <= index < len(findings):
+            await self.send_long(chat_id, "Finding not found.")
             return
         finding = findings[index]
         fields = [
@@ -1078,44 +1082,34 @@ class ARESBot:
             ("Technical analysis", "technical_analysis"), ("Evidence", "evidence"),
             ("Remediation", "remediation_steps"),
         ]
-        chunks = [f"<b>{_h(finding.get('title', 'Untitled finding'))}</b>"]
+        chunks = [str(finding.get("title", "Untitled finding"))]
         for label, key in fields:
             value = finding.get(key)
             if value:
                 if isinstance(value, (dict, list)):
                     value = json.dumps(value, ensure_ascii=False, indent=2)
-                chunks.append(f"<b>{label}</b>\n{_h(str(value)[:260])}")
-        await self.render_menu(
-            chat_id,
-            "\n\n".join(chunks),
-            [[_button("⬅️ Findings", "run:findings")]],
-        )
+                chunks.append(f"{label}\n{str(value)}")
+        await self.send_long(chat_id, "\n\n".join(chunks))
 
     async def _open_viewer(self, chat_id: int) -> None:
         try:
             result = await self.adapter.open_viewer()
             url = result.get("url")
             if url:
-                await self.render_menu(
+                await self.send_long(
                     chat_id,
                     "Strix Viewer started on the GitHub Runner. Its URL is private to that worker "
                     "and cannot be opened directly from Telegram without a secure tunnel.\n"
-                    f"Runner-local URL: <code>{_h(url)}</code>",
-                    self._run_keyboard(),
+                    f"Runner-local URL: {url}",
                 )
             else:
-                await self.render_menu(
+                await self.send_long(
                     chat_id,
-                    f"Viewer status: <b>{_h(result.get('status', 'unavailable'))}</b>\n"
-                    f"{_h(result.get('error', 'No viewer URL returned'))}",
-                    self._run_keyboard(),
+                    f"Viewer status: {result.get('status', 'unavailable')}\n"
+                    f"{result.get('error', 'No viewer URL returned')}",
                 )
         except Exception as exc:
-            await self.render_menu(
-                chat_id,
-                f"⚠️ Viewer could not start: <code>{_h(str(exc)[:500])}</code>",
-                self._run_keyboard(),
-            )
+            await self.send_long(chat_id, f"Viewer could not start: {str(exc)[:1000]}")
 
     async def _show_history(self, chat_id: int) -> None:
         rows = []
@@ -1124,7 +1118,7 @@ class ARESBot:
             label = f"{item['status']} · {item['findings']} findings · {item['target']}"
             rows.append([_button(label[:60], f"history:view:{name}")])
         rows.append([_button("⬅️ Main menu", "menu:home")])
-        await self.render_menu(chat_id, "<b>Strix scan history</b>\nSelect a run to inspect or resume.", rows)
+        await self.render_menu(chat_id, "<b>Strix scan history</b>\nSelect a run to inspect, resume or delete.", rows)
 
     async def _show_run_history_item(self, chat_id: int, run_name: str) -> None:
         item = next((x for x in self.adapter.history() if x["run_name"] == run_name), None)
@@ -1135,6 +1129,7 @@ class ARESBot:
         if item.get("resumable"):
             buttons.append(_button("▶️ Resume", f"history:resume:{run_name}"))
         buttons.append(_button("📄 Open report", f"history:report:{run_name}"))
+        buttons.append(_button("🗑 Delete this run", f"history:delete:{run_name}"))
         await self.render_menu(
             chat_id,
             f"<b>{_h(run_name)}</b>\nTarget: {_h(item['target'])}\n"
