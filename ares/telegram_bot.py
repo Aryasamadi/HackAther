@@ -158,7 +158,7 @@ class ARESBot:
             if not self.adapter.running:
                 continue
             try:
-                await self._checkpoint_snapshot()
+                await asyncio.shield(self._checkpoint_snapshot())
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -234,7 +234,7 @@ class ARESBot:
                     pass
         await self.adapter.close()
         try:
-            await self._checkpoint_snapshot()
+            await asyncio.shield(self._checkpoint_snapshot())
         except Exception:
             logger.exception("Final durable Strix checkpoint failed")
         try:
@@ -833,7 +833,7 @@ class ARESBot:
             self._set_scan_control(run_name, "running", "running")
             try:
                 await self._save_state()
-                await self._checkpoint_snapshot()
+                await asyncio.shield(self._checkpoint_snapshot())
             except Exception:
                 await self.adapter.stop_scan()
                 self._set_scan_control(run_name, "recovery_required", "initial_checkpoint_failed")
@@ -923,7 +923,7 @@ class ARESBot:
             self._set_scan_control(name, "running", "running")
             try:
                 await self._save_state()
-                await self._checkpoint_snapshot()
+                await asyncio.shield(self._checkpoint_snapshot())
             except Exception:
                 await self.adapter.stop_scan()
                 self._set_scan_control(name, "recovery_required", "resume_checkpoint_failed")
@@ -1100,7 +1100,7 @@ class ARESBot:
             )
         try:
             await self._save_state()
-            await self._checkpoint_snapshot()
+            await asyncio.shield(self._checkpoint_snapshot())
         except Exception:
             logger.exception("Could not persist the final Strix run state")
 
@@ -1555,7 +1555,7 @@ class ARESBot:
                     await self._save_state()
                     await self.adapter.stop_scan()
                     self._set_scan_control(run_name, "manual_stop", "stopped")
-                    await self._checkpoint_snapshot()
+                    await asyncio.shield(self._checkpoint_snapshot())
                     await self._save_state()
                 else:
                     await self.adapter.stop_scan()
@@ -1836,7 +1836,13 @@ async def async_main() -> None:
     )
 
     # Prefer durable repository storage. The Actions artifact remains a legacy fallback.
-    remote_restored = await snapshot_store.restore(remote_snapshot_path)
+    try:
+        remote_restored = await snapshot_store.restore(remote_snapshot_path)
+    except Exception:
+        remote_restored = False
+        logger.exception(
+            "Durable Strix snapshot could not be read; trying the legacy Actions artifact"
+        )
     if remote_restored:
         try:
             restore_snapshot(
