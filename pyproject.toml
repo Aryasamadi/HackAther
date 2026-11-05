@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hackather-ares"
+version = "0.2.0"
+description = "Telegram interface and orchestration layer for the official Strix runtime"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "strix-agent==1.7.0",
+  "httpx>=0.27,<1",
+  "cryptography>=48,<49",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.11"]
+
+[tool.setuptools.packages.find]
+include = ["ares*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
