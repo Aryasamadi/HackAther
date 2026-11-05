@@ -68,7 +68,7 @@ See docs/FEATURE_PARITY.md for the current capability-by-capability status and k
 
 ## GitHub-hosted runner lifecycle
 
-GitHub-hosted runners are temporary. ARES therefore treats each workflow run as a replaceable worker, not as permanent storage. Telegram update offsets and Provider/MCP records are encrypted and committed to `.ares/state.enc`. Strix run directories are archived with authenticated encryption and checkpointed to `.ares/strix-runs.enc` in the repository through the GitHub Contents API.
+GitHub-hosted runners are temporary. ARES therefore treats each workflow run as a replaceable worker, not as permanent storage. Telegram update offsets and Provider/MCP records are encrypted and committed to `.ares/state.enc`. Strix run directories are archived with authenticated encryption and checkpointed as a rotating asset in the fixed GitHub pre-release `ares-state-snapshot`. The new asset is uploaded and verified before older snapshot assets are removed, so checkpoints do not create an ever-growing Git commit history.
 
 While a scan is active, ARES writes a durable checkpoint every two minutes, immediately after a scan starts or resumes, after a manual stop, and during graceful worker shutdown. The latest complete checkpoint remains in repository storage independently of the Actions run that produced it. The workflow artifact `ares-strix-state` is retained as a secondary, 30-day compatibility fallback; it is no longer the primary source of truth.
 
