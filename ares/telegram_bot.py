@@ -509,7 +509,14 @@ class ARESBot:
             await self.telegram.call("answerCallbackQuery", {"callback_query_id": query_id, "text": "Not authorized"})
             return
         message = callback.get("message", {})
-        chat_id = int(message.get("chat", {}).get("id", self.config.admin_id))
+        chat = message.get("chat", {})
+        if chat.get("type") != "private":
+            await self.telegram.call(
+                "answerCallbackQuery",
+                {"callback_query_id": query_id, "text": "Use ARES in a private chat.", "show_alert": True},
+            )
+            return
+        chat_id = int(chat.get("id", self.config.admin_id))
         data = str(callback.get("data", ""))
         await self.telegram.call("answerCallbackQuery", {"callback_query_id": query_id})
         parts = data.split(":")
@@ -620,10 +627,27 @@ class ARESBot:
         sender = message.get("from", {})
         if sender.get("id") != self.config.admin_id:
             return
-        chat_id = int(message.get("chat", {}).get("id", self.config.admin_id))
+        chat = message.get("chat", {})
+        if chat.get("type") != "private":
+            return
+        chat_id = int(chat.get("id", self.config.admin_id))
         text = str(message.get("text") or "").strip()
         if not text:
             return
+        pending = self.state.get("pending")
+        if (
+            isinstance(pending, dict)
+            and pending.get("kind") == "provider"
+            and pending.get("step") == "token"
+            and isinstance(message.get("message_id"), int)
+        ):
+            try:
+                await self.telegram.call(
+                    "deleteMessage",
+                    {"chat_id": chat_id, "message_id": message["message_id"]},
+                )
+            except httpx.HTTPError:
+                logger.warning("Could not delete the submitted provider-token message")
         command = text.split()[0].split("@", 1)[0].lower()
         if command in {"/start", "/menu"}:
             self.state["pending"] = None
