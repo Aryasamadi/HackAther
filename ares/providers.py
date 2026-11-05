@@ -53,6 +53,34 @@ def build_model_reference(provider_id: str, model_id: str) -> str:
     return model if model.startswith(prefix) else f"{prefix}{model}"
 
 
+def model_button_label(provider: dict[str, object], model: object) -> str:
+    """Show the model ID without the provider routing prefix used internally."""
+    label = str(model).strip()
+    prefixes = (
+        str(provider.get("litellm_id", "")).strip(),
+        str(provider.get("name", "")).strip(),
+    )
+    for prefix in prefixes:
+        marker = f"{prefix}/" if prefix else ""
+        if marker and label.casefold().startswith(marker.casefold()):
+            candidate = label[len(marker):]
+            if candidate:
+                return candidate
+    return label
+
+
+def remove_provider(state: dict[str, object], provider_id: str) -> bool:
+    """Remove one provider and clear selection only when it was the active one."""
+    providers = state.get("providers")
+    if not isinstance(providers, dict) or provider_id not in providers:
+        return False
+    del providers[provider_id]
+    if state.get("active_provider_id") == provider_id:
+        state["active_provider_id"] = None
+        state["active_model"] = None
+    return True
+
+
 async def discover_models(base_url: str, api_token: str) -> list[str]:
     if not api_token.strip():
         raise ValueError("Provider token is empty")
