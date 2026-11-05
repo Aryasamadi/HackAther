@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -99,3 +100,97 @@ def test_live_view_event_schema_matches_native_strix() -> None:
 
 def test_bot_module_imports_without_starting_network_clients() -> None:
     assert ARESBot is not None
+
+
+@pytest.mark.asyncio
+async def test_provider_wizard_requests_name_then_base_url_then_token() -> None:
+    bot = ARESBot.__new__(ARESBot)
+    bot.state = {"pending": {"kind": "provider", "step": "name"}}
+    bot.render_menu = AsyncMock()
+
+    assert await bot._consume_pending(123, "My Gateway") is True
+    assert bot.state["pending"]["step"] == "base_url"
+
+    assert await bot._consume_pending(123, "https://api.example.com/v1") is True
+    assert bot.state["pending"]["step"] == "token"
+    assert bot.state["pending"]["name"] == "My Gateway"
+
+
+@pytest.mark.asyncio
+async def test_mcp_wizard_collects_http_fields_without_json() -> None:
+    bot = ARESBot.__new__(ARESBot)
+    bot.state = {
+        "pending": {
+            "kind": "mcp",
+            "step": "http_url",
+            "draft": {"name": "github", "transport": "http"},
+        },
+        "mcp_servers": [],
+    }
+    bot.render_menu = AsyncMock()
+
+    assert await bot._consume_pending(123, "https://mcp.example.com/mcp") is True
+    assert bot.state["pending"]["step"] == "auth"
+
+    bot.state["pending"]["draft"]["auth"] = {
+        "kind": "bearer",
+        "token": "test-secret-token",
+    }
+    bot.state["pending"]["step"] = "allowed_tools"
+    assert await bot._consume_pending(123, "search_repositories, get_repository") is True
+    assert bot.state["pending"]["step"] == "notes"
+    assert await bot._consume_pending(123, "-") is True
+
+    saved = bot.state["mcp_servers"]
+    assert len(saved) == 1
+    config = McpConnectionConfig.model_validate(saved[0])
+    assert config.name == "github"
+    assert config.url == "https://mcp.example.com/mcp"
+    assert config.auth.token == "test-secret-token"
+    assert config.allowed_tools == ["search_repositories", "get_repository"]
+    assert bot.state["pending"] is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_wizard_collects_stdio_command_args_and_environment() -> None:
+    bot = ARESBot.__new__(ARESBot)
+    bot.state = {
+        "pending": {
+            "kind": "mcp",
+            "step": "stdio_command",
+            "draft": {"name": "local-tools", "transport": "stdio"},
+        },
+        "mcp_servers": [],
+    }
+    bot.render_menu = AsyncMock()
+
+    assert await bot._consume_pending(123, "python") is True
+    assert bot.state["pending"]["step"] == "stdio_args"
+    assert await bot._consume_pending(123, "-m\nexample_mcp_server") is True
+    assert bot.state["pending"]["step"] == "stdio_env"
+    assert await bot._consume_pending(123, "MODE=test\nREGION=local") is True
+    assert bot.state["pending"]["step"] == "allowed_tools"
+    assert await bot._consume_pending(123, "-") is True
+    assert bot.state["pending"]["step"] == "notes"
+    assert await bot._consume_pending(123, "-") is True
+
+    config = McpConnectionConfig.model_validate(bot.state["mcp_servers"][0])
+    assert config.command == "python"
+    assert config.args == ["-m", "example_mcp_server"]
+    assert config.env == {"MODE": "test", "REGION": "local"}
+
+
+@pytest.mark.asyncio
+async def test_render_menu_edits_current_panel_instead_of_sending_another() -> None:
+    bot = ARESBot.__new__(ARESBot)
+    bot.state = {"ui_message_id": 901, "ui_chat_id": 123}
+    bot.telegram = type("Telegram", (), {"call": AsyncMock(return_value={})})()
+    bot.send = AsyncMock()
+
+    await bot.render_menu(123, "<b>Updated panel</b>", [])
+
+    bot.telegram.call.assert_awaited_once()
+    method, payload = bot.telegram.call.await_args.args
+    assert method == "editMessageText"
+    assert payload["message_id"] == 901
+    bot.send.assert_not_awaited()

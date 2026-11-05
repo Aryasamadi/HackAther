@@ -15,8 +15,8 @@ def test_provider_descriptor_with_custom_label() -> None:
     )
 
 
-def test_provider_descriptor_defaults_label_to_litellm_id() -> None:
-    assert parse_provider_descriptor("anthropic") == ("anthropic", "anthropic")
+def test_provider_name_alone_uses_default_route() -> None:
+    assert parse_provider_descriptor("My AI Provider") == ("My AI Provider", "openai")
 
 
 def test_provider_descriptor_rejects_invalid_litellm_id() -> None:

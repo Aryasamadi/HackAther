@@ -21,25 +21,19 @@ Only add these two repository Actions secrets:
 
 The workflow receives GITHUB_TOKEN and GITHUB_REPOSITORY automatically from GitHub Actions. The workflow grants the built-in token contents:write to store the encrypted ARES state file. No PAT or third user-managed secret is required.
 
-Run the workflow manually from Actions, or use the five-minute schedule on the default branch. The feature-branch workflow can also be triggered by a push to phase-3/feature-parity for integration verification.
+Run the workflow manually from Actions, or use the five-minute schedule on the default branch. Code deployments to main stop the previous runtime worker, restore the most recent encrypted Strix run snapshot and start the updated bot. Commits that only update encrypted state are excluded from the push trigger.
 
 ## Provider setup
 
-Open Models → Add provider. The three prompts are:
+Open Models → Add model provider. The three prompts are exactly:
 
-1. Provider
+1. Display name (for example OpenRouter, Groq or My Gateway)
 2. Base URL
 3. Token
 
-The Provider field supports a custom display name plus LiteLLM's provider identifier, separated by a vertical bar:
+No JSON or LiteLLM provider identifier is requested. ARES discovers models from the provider's OpenAI-compatible /v1/models or /models endpoint and routes the model through Strix's OpenAI-compatible LiteLLM adapter. This onboarding path is for providers exposing that compatible API surface; proprietary APIs with different auth or model-list formats need a dedicated connector and are not assumed to work automatically.
 
-- OpenRouter Personal | openrouter
-- My Gateway | openai
-- Local Ollama | ollama
-
-The provider must expose an OpenAI-compatible model listing endpoint at /v1/models or /models. ARES tries both. Model discovery is not a universal standard across all LLM services; providers without one of these endpoints cannot be auto-discovered by this three-field flow.
-
-Model pages show ten models at a time in two columns. The selected model is translated into the provider/model format Strix expects.
+Model pages show ten models at a time in two columns. You can refresh a provider's catalog without re-entering the token. The selected model is passed to Strix using its LiteLLM configuration.
 
 ## Scan controls
 
@@ -53,9 +47,9 @@ Model pages show ten models at a time in two columns. The selected model is tran
 
 ## MCP connections
 
-Open MCP servers and paste one native Strix MCP connection JSON object. Multiple entries may be supplied as a JSON array. Strix validates and connects them; ARES does not implement an MCP client. The schema supports HTTP and stdio transports, bearer authentication, environment variables, tool allowlists and other native fields.
+Open MCP servers → Add MCP connection. ARES asks for the connection name, then lets you choose HTTP or STDIO. HTTP setup asks for the endpoint and whether a Bearer token is required; STDIO setup asks for the command, optional arguments and environment variables. Both flows optionally collect a purpose/notes field. No JSON is required. Before saving, ARES validates the collected fields against Strix's native MCP connection schema. Strix remains the MCP client and owns the actual connection lifecycle.
 
-MCP credentials are included in encrypted ARES state. Submitted MCP configuration messages are deleted from the private Telegram chat after receipt where Telegram permits deletion.
+MCP credentials are included in encrypted ARES state. Only Bearer-token messages are deleted from the private Telegram chat after receipt where Telegram permits deletion.
 
 ## Strix runtime integration
 

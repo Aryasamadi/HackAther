@@ -30,9 +30,9 @@ This matrix tracks native Strix capabilities against the ARES Telegram adapter. 
 ## Explicit limitations
 
 - The Viewer listens on the GitHub-hosted runner. Its loopback URL is not reachable from a Telegram client without a separately configured secure tunnel. ARES reports this instead of exposing a misleading link.
-- MCP server entries accept the full native Strix connection schema. The simple add flow currently accepts JSON rather than attempting to invent a reduced or ambiguous schema for every transport.
-- The model catalog flow still requires an OpenAI-compatible GET /v1/models or GET /models endpoint.
+- MCP onboarding is a guided form: name, transport, HTTP endpoint or STDIO command, optional Bearer token, optional tool allowlist and purpose notes. The collected fields are validated using Strix's native connection schema. Advanced timing/concurrency fields retain Strix defaults and are not yet exposed as Telegram controls.
+- Provider onboarding asks for display name, Base URL and token. Model discovery requires an OpenAI-compatible GET /v1/models or GET /models endpoint; non-compatible provider APIs are not assumed to work.
 - Several Strix interfaces used for interactive control are internal package interfaces. The Strix dependency is pinned, and CI tests imports and adapter contracts to catch compatibility drift.
 - GitHub-hosted Actions remain finite-lived workers. Artifacts and encrypted state support handoff and later resume; this does not create a guaranteed 24/7 process.
 
-The matrix is intentionally candid: “implemented” means a Telegram operation is connected to the corresponding Strix capability, not that a live penetration test has been run on a customer target.
+Model-provider and MCP setup screens edit the same Telegram control message. Callback-driven validation errors use Telegram popup alerts; text-field validation errors are shown inline in the same panel. The matrix is intentionally candid: “implemented” means a Telegram operation is connected to the corresponding Strix capability, not that a live penetration test has been run on a customer target.
