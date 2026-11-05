@@ -13,7 +13,8 @@ import httpx
 
 from ares.config import Config
 from ares.providers import discover_models, model_button_label, new_provider, remove_provider
-from ares.snapshot import restore_snapshot
+from ares.snapshot import create_snapshot, restore_snapshot
+from ares.snapshot_store import SnapshotStore
 from ares.state_store import StateStore
 from ares.strix_adapter import StrixAdapter
 from strix.tools.mcp import McpConnectionConfig
@@ -96,18 +97,132 @@ class TelegramAPI:
 
 
 class ARESBot:
-    def __init__(self, config: Config, store: StateStore, state: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        config: Config,
+        store: StateStore,
+        state: dict[str, Any],
+        snapshot_store: SnapshotStore | None = None,
+    ) -> None:
         self.config = config
         self.store = store
         self.state = state
+        self.snapshot_store = snapshot_store
+        self.snapshot_path = Path("ares-state/strix-runs.enc")
+        self.snapshot_lock = asyncio.Lock()
         self.telegram = TelegramAPI(config.telegram_token)
         self.adapter = StrixAdapter()
         self.monitor_task: asyncio.Task[None] | None = None
         self.startup_task: asyncio.Task[None] | None = None
+        self.checkpoint_task: asyncio.Task[None] | None = None
         self.chat_id: int | None = None
 
+    def _set_scan_control(self, run_name: str, intent: str, status: str) -> None:
+        previous = self.state.get("scan_control")
+        started_at = (
+            previous.get("started_at")
+            if isinstance(previous, dict) and previous.get("run_name") == run_name
+            else int(time.time())
+        )
+        self.state["scan_control"] = {
+            "run_name": run_name,
+            "intent": intent,
+            "status": status,
+            "started_at": started_at,
+            "updated_at": int(time.time()),
+        }
+
+    async def _save_state(self) -> None:
+        await self.store.save(self.state)
+
+    async def _checkpoint_snapshot(self) -> bool:
+        if self.snapshot_store is None:
+            return False
+        async with self.snapshot_lock:
+            await asyncio.to_thread(
+                create_snapshot,
+                Path("strix_runs"),
+                self.snapshot_path,
+                bot_token=self.config.telegram_token,
+                repository=self.config.github_repository or "",
+                admin_id=self.config.admin_id,
+            )
+            await self.snapshot_store.save(self.snapshot_path)
+            logger.info("Durable encrypted Strix checkpoint committed")
+            return True
+
+    async def _checkpoint_loop(self) -> None:
+        while True:
+            await asyncio.sleep(120)
+            if not self.adapter.running:
+                continue
+            try:
+                await self._checkpoint_snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Periodic Strix checkpoint failed; previous checkpoint remains intact")
+
+    @staticmethod
+    def _should_auto_resume(control: object) -> bool:
+        return (
+            isinstance(control, dict)
+            and control.get("intent") in {"running", "handoff"}
+            and isinstance(control.get("run_name"), str)
+            and bool(control.get("run_name"))
+        )
+
+    async def recover_interrupted_scan(self) -> None:
+        control = self.state.get("scan_control")
+        if not self._should_auto_resume(control):
+            return
+        assert isinstance(control, dict)
+        run_name = str(control["run_name"])
+        history_item = next(
+            (item for item in self.adapter.history() if item.get("run_name") == run_name),
+            None,
+        )
+        if history_item is None or not history_item.get("resumable"):
+            status = "history_missing" if history_item is None else "not_resumable"
+            self._set_scan_control(run_name, "recovery_required", status)
+            await self._save_state()
+            await self.send(
+                self.config.admin_id,
+                f"⚠️ Previous Strix run <code>{_h(run_name)}</code> was recovered, "
+                "but Strix does not currently mark it resumable. Its history was preserved; "
+                "no new scan was started.",
+            )
+            return
+
+        chat_id = self.state.get("ui_chat_id")
+        if not isinstance(chat_id, int):
+            chat_id = self.config.admin_id
+        self.chat_id = chat_id
+        await self.send(
+            chat_id,
+            f"♻️ Recovered interrupted Strix run <code>{_h(run_name)}</code>. "
+            "Attempting to resume from the latest durable checkpoint.",
+        )
+        await self._resume_scan(chat_id, run_name)
+
     async def close(self) -> None:
-        for task in (self.startup_task, self.monitor_task):
+        control = self.state.get("scan_control")
+        if self.adapter.running:
+            run_name = self.adapter.run_name or self.state.get("active_run")
+            if isinstance(run_name, str) and run_name:
+                if not isinstance(control, dict) or control.get("intent") in {"running", "handoff"}:
+                    self._set_scan_control(run_name, "handoff", "stopping_for_runner_handoff")
+        elif isinstance(control, dict) and control.get("intent") == "running":
+            run_name = str(control.get("run_name") or self.state.get("active_run") or "")
+            if run_name:
+                self._set_scan_control(run_name, "completed", "finished_before_runner_handoff")
+
+        try:
+            await self._save_state()
+        except Exception:
+            logger.exception("Could not persist scan lifecycle before worker shutdown")
+
+        for task in (self.checkpoint_task, self.startup_task, self.monitor_task):
             if task is not None and not task.done():
                 task.cancel()
                 try:
@@ -115,6 +230,14 @@ class ARESBot:
                 except asyncio.CancelledError:
                     pass
         await self.adapter.close()
+        try:
+            await self._checkpoint_snapshot()
+        except Exception:
+            logger.exception("Final durable Strix checkpoint failed")
+        try:
+            await self._save_state()
+        except Exception:
+            logger.exception("Could not persist final ARES state")
         await self.telegram.close()
 
     async def send(
@@ -704,6 +827,12 @@ class ARESBot:
                 mcp_exclude=self.state.get("mcp_exclude", []),
             )
             self.state["active_run"] = run_name
+            self._set_scan_control(run_name, "running", "running")
+            try:
+                await self._save_state()
+            except Exception:
+                await self.adapter.stop_scan()
+                raise
             await self.render_menu(
                 chat_id,
                 f"<b>Strix live control</b>\nRun: <code>{_h(run_name)}</code>\nStatus: <b>running</b>",
@@ -782,6 +911,8 @@ class ARESBot:
                 mcp_exclude=self.state.get("mcp_exclude", []),
             )
             self.state["active_run"] = name
+            self._set_scan_control(name, "running", "running")
+            await self._save_state()
             await self.render_menu(
                 chat_id,
                 f"<b>Strix live control</b>\nRun: <code>{_h(name)}</code>\nStatus: <b>running</b>",
@@ -792,6 +923,11 @@ class ARESBot:
             raise
         except Exception as exc:
             logger.exception("Could not resume Strix scan")
+            self._set_scan_control(run_name, "recovery_required", "resume_failed")
+            try:
+                await self._save_state()
+            except Exception:
+                logger.exception("Could not persist failed Resume state")
             await self.edit(
                 chat_id,
                 message_id,
@@ -928,7 +1064,26 @@ class ARESBot:
             await render_assistant_text(snapshot)
             await asyncio.sleep(4)
 
-        await render_assistant_text(self.adapter.snapshot())
+        final_snapshot = self.adapter.snapshot()
+        await render_assistant_text(final_snapshot)
+        control = self.state.get("scan_control")
+        if isinstance(control, dict) and control.get("intent") in {"manual_stop", "handoff"}:
+            control["status"] = (
+                "stopped" if control.get("intent") == "manual_stop" else "handoff_stopped"
+            )
+            control["updated_at"] = int(time.time())
+        else:
+            final_status = str(final_snapshot.get("status") or "finished")
+            self._set_scan_control(
+                run_name,
+                "completed",
+                "failed" if final_snapshot.get("error") else final_status,
+            )
+        try:
+            await self._save_state()
+            await self._checkpoint_snapshot()
+        except Exception:
+            logger.exception("Could not persist the final Strix run state")
 
     async def _show_agents(self, chat_id: int) -> None:
         agents = self.adapter.snapshot().get("agents", [])
@@ -1374,7 +1529,17 @@ class ARESBot:
                     notice = "⏸ Budget pause requested."
                 await self.render_menu(chat_id, notice, self._run_keyboard())
             elif data == "run:stop":
-                await self.adapter.stop_scan()
+                run_name = self.adapter.run_name or self.state.get("active_run")
+                if self.adapter.running and isinstance(run_name, str) and run_name:
+                    # Persist intent first: a restart must never auto-resume a user-stopped scan.
+                    self._set_scan_control(run_name, "manual_stop", "stopping")
+                    await self._save_state()
+                    await self.adapter.stop_scan()
+                    self._set_scan_control(run_name, "manual_stop", "stopped")
+                    await self._checkpoint_snapshot()
+                    await self._save_state()
+                else:
+                    await self.adapter.stop_scan()
                 await self.show_home(chat_id)
             elif data == "run:report":
                 report = self.adapter.report_markdown()
@@ -1599,6 +1764,11 @@ class ARESBot:
 
     async def run(self) -> None:
         await self.telegram.call("deleteWebhook", {"drop_pending_updates": False})
+        if self.checkpoint_task is None or self.checkpoint_task.done():
+            self.checkpoint_task = asyncio.create_task(
+                self._checkpoint_loop(),
+                name="ares-durable-checkpoint",
+            )
         offset = int(self.state.get("update_offset", 0))
         deadline = time.monotonic() + self.config.runtime_minutes * 60
         logger.info("ARES Telegram worker started for %s minutes", self.config.runtime_minutes)
@@ -1635,16 +1805,56 @@ async def async_main() -> None:
         raise RuntimeError(
             "This deployment requires the automatic GitHub Actions GITHUB_TOKEN and GITHUB_REPOSITORY."
         )
-    from pathlib import Path
 
     snapshot_path = Path("ares-state/strix-runs.enc")
-    restore_snapshot(
-        snapshot_path,
-        Path("."),
+    remote_snapshot_path = Path("ares-state/remote-strix-runs.enc")
+    snapshot_store = SnapshotStore(
         bot_token=config.telegram_token,
-        repository=config.github_repository,
         admin_id=config.admin_id,
+        repository=config.github_repository,
+        github_token=config.github_token,
+        branch=config.github_ref,
     )
+
+    # Prefer durable repository storage. The Actions artifact remains a legacy fallback.
+    remote_restored = await snapshot_store.restore(remote_snapshot_path)
+    if remote_restored:
+        try:
+            restore_snapshot(
+                remote_snapshot_path,
+                Path("."),
+                bot_token=config.telegram_token,
+                repository=config.github_repository,
+                admin_id=config.admin_id,
+            )
+            remote_snapshot_path.replace(snapshot_path)
+            logger.info("Restored durable encrypted Strix history from repository storage")
+        except Exception:
+            if not snapshot_path.is_file():
+                raise
+            logger.exception(
+                "Durable Strix snapshot could not be restored; trying the legacy Actions artifact"
+            )
+            restore_snapshot(
+                snapshot_path,
+                Path("."),
+                bot_token=config.telegram_token,
+                repository=config.github_repository,
+                admin_id=config.admin_id,
+            )
+    else:
+        restored = restore_snapshot(
+            snapshot_path,
+            Path("."),
+            bot_token=config.telegram_token,
+            repository=config.github_repository,
+            admin_id=config.admin_id,
+        )
+        if restored:
+            logger.info("Restored Strix history from the legacy Actions artifact")
+        else:
+            logger.info("No previous Strix history exists; starting with an empty history")
+
     store = StateStore(
         bot_token=config.telegram_token,
         admin_id=config.admin_id,
@@ -1653,30 +1863,20 @@ async def async_main() -> None:
         branch=config.github_ref,
         local_path=config.state_path,
     )
-    state = await store.load()
-    bot = ARESBot(config, store, state)
     try:
-        await bot.run()
+        state = await store.load()
+        bot = ARESBot(config, store, state, snapshot_store=snapshot_store)
+        try:
+            await bot.recover_interrupted_scan()
+            await bot.run()
+        finally:
+            await bot.close()
     finally:
         try:
-            await bot.close()
+            await store.save(state if "state" in locals() else {})
         finally:
-            from ares.snapshot import create_snapshot
-
-            try:
-                if create_snapshot(
-                    Path("strix_runs"),
-                    snapshot_path,
-                    bot_token=config.telegram_token,
-                    repository=config.github_repository,
-                    admin_id=config.admin_id,
-                ):
-                    logger.info("Encrypted Strix run history snapshot saved")
-            finally:
-                try:
-                    await store.save(state)
-                finally:
-                    await store.close()
+            await store.close()
+            await snapshot_store.close()
 
 
 def main() -> None:
