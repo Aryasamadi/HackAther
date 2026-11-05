@@ -234,6 +234,7 @@ class SnapshotStore:
                         delete_response.raise_for_status()
                 except Exception:
                     logger.warning(
-                        "New ARES snapshot is stored, but an older release asset could not be removed"
+                        "New ARES snapshot is stored, but an older release asset "
+                        "could not be removed"
                     )
             logger.info("Durable encrypted Strix release asset committed")
