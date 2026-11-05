@@ -1204,6 +1204,7 @@ class ARESBot:
         data = str(callback.get("data", ""))
         parts = data.split(":")
         action = parts[0] if parts else ""
+        callback_answered = False
         try:
             if data == "menu:home":
                 await self.show_home(chat_id)
@@ -1380,7 +1381,11 @@ class ARESBot:
             elif data == "run:agents":
                 await self._show_agents(chat_id)
             elif data == "run:findings":
-                await self._show_findings(chat_id)
+                if not await self._show_findings(chat_id):
+                    await self.answer_callback(
+                        query_id, "No findings have been recorded yet.", show_alert=True
+                    )
+                    callback_answered = True
             elif data == "run:events":
                 await self._show_events(chat_id)
             elif data == "run:viewer":
@@ -1389,35 +1394,71 @@ class ARESBot:
                 await self._show_agent_events(chat_id, parts[2])
             elif action == "finding" and len(parts) == 3 and parts[1] == "view":
                 await self._show_finding(chat_id, int(parts[2]))
-            elif data == "run:pause":
-                await self.adapter.pause_budget()
-                await self.render_menu(chat_id, "⏸ Budget pause requested.", self._run_keyboard())
-            elif data == "run:resume_budget":
-                await self.adapter.resume_budget()
-                await self.render_menu(chat_id, "▶️ Budget pause released.", self._run_keyboard())
+            elif data == "run:toggle_budget":
+                if self.adapter.snapshot().get("budget_paused", False):
+                    await self.adapter.resume_budget()
+                    notice = "▶️ Budget resumed."
+                else:
+                    await self.adapter.pause_budget()
+                    notice = "⏸ Budget pause requested."
+                await self.render_menu(chat_id, notice, self._run_keyboard())
             elif data == "run:stop":
                 await self.adapter.stop_scan()
                 await self.show_home(chat_id)
             elif data == "run:report":
-                await self.send_long(
-                    chat_id,
-                    html.escape(self.adapter.report_markdown() or "The report is not available yet."),
-                    self._run_keyboard(),
-                )
+                report = self.adapter.report_markdown()
+                if not report.strip():
+                    await self.answer_callback(
+                        query_id, "The report is not available yet.", show_alert=True
+                    )
+                    callback_answered = True
+                else:
+                    await self.send_long(chat_id, report)
             elif data == "runs:list":
                 await self._show_history(chat_id)
             elif action == "history" and len(parts) == 3 and parts[1] == "view":
                 await self._show_run_history_item(chat_id, parts[2])
+            elif action == "history" and len(parts) == 3 and parts[1] == "delete":
+                run_name = parts[2]
+                if not any(item["run_name"] == run_name for item in self.adapter.history()):
+                    raise ValueError("Run not found")
+                if self.adapter.running and run_name == self.adapter.run_name:
+                    raise ValueError("The active scan cannot be deleted")
+                if len(f"history:delete:{run_name}") > 64:
+                    raise ValueError("Run name is too long to use in a confirmation button")
+                self.state["pending_history_delete"] = run_name
+                await self.render_menu(
+                    chat_id,
+                    f"⚠️ <b>Delete this scan history?</b>\\n"
+                    f"Run: <code>{_h(run_name)}</code>\\n"
+                    "Only this run's files will be deleted. The encrypted ARES state and other runs will remain untouched.",
+                    [[_button("🗑 Confirm delete", "history:delete:confirm")],
+                     [_button("Cancel", "history:delete:cancel")]],
+                )
+            elif data == "history:delete:confirm":
+                run_name = self.state.pop("pending_history_delete", None)
+                if not isinstance(run_name, str):
+                    raise ValueError("No history deletion is awaiting confirmation")
+                self.adapter.delete_history_item(run_name)
+                await self.render_menu(
+                    chat_id,
+                    f"✅ Deleted scan history: <code>{_h(run_name)}</code>",
+                    [[_button("📚 Back to history", "runs:list")]],
+                )
+            elif data == "history:delete:cancel":
+                self.state.pop("pending_history_delete", None)
+                await self._show_history(chat_id)
             elif action == "history" and len(parts) == 3 and parts[1] == "resume":
                 await self._resume_scan(chat_id, parts[2])
             elif action == "history" and len(parts) == 3 and parts[1] == "report":
-                from strix.core.paths import run_dir_for
-                path = run_dir_for(parts[2]) / "penetration_test_report.md"
-                try:
-                    report = path.read_text(encoding="utf-8")
-                except OSError:
-                    report = "Report not found."
-                await self.send_long(chat_id, html.escape(report or "Report is empty."))
+                report = self.adapter.report_markdown(parts[2])
+                if not report.strip():
+                    await self.answer_callback(
+                        query_id, "The report is not available yet.", show_alert=True
+                    )
+                    callback_answered = True
+                else:
+                    await self.send_long(chat_id, report)
             elif action == "agent" and len(parts) == 3 and parts[1] == "view":
                 await self._show_agent(chat_id, parts[2])
             elif action == "agent" and len(parts) == 3 and parts[1] == "message":
@@ -1472,7 +1513,8 @@ class ARESBot:
             logger.exception("ARES callback action failed")
             await self.answer_callback(query_id, f"ARES: {str(exc)[:150]}", show_alert=True)
         else:
-            await self.answer_callback(query_id)
+            if not callback_answered:
+                await self.answer_callback(query_id)
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         sender = message.get("from", {})
