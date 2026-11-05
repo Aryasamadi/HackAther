@@ -10,9 +10,10 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
+# Never cancel a live worker before its Python shutdown/checkpoint hooks can run.
 concurrency:
   group: ares-runtime
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -135,14 +136,9 @@ jobs:
               core.warning("Previous runtime runs exist, but none has a usable encrypted Strix history artifact.");
             }
 
-      - name: Refuse to start without a recoverable history snapshot
-        if: steps.previous.outputs.has_previous_runtime == 'true' && steps.previous.outputs.run_id == ''
-        run: |
-          echo "::error::A previous ARES runtime exists, but no unexpired Strix history snapshot was found. Refusing to start with an empty history."
-          exit 1
-
-      - name: Restore encrypted Strix run snapshot
+      - name: Restore legacy encrypted Strix run snapshot (fallback only)
         if: steps.previous.outputs.run_id != ''
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: ares-strix-state
@@ -151,11 +147,15 @@ jobs:
           repository: ${{ github.repository }}
           path: ares-state
 
-      - name: Validate restored Strix history snapshot
+      - name: Report legacy artifact availability
         if: steps.previous.outputs.run_id != ''
         shell: bash
         run: |
-          test -s ares-state/strix-runs.enc || (echo "::error::The downloaded Strix history snapshot is missing or empty." && exit 1)
+          if [ -s ares-state/strix-runs.enc ]; then
+            echo "Legacy Actions artifact is available as a fallback."
+          else
+            echo "::warning::Legacy artifact unavailable; ARES will try durable repository storage."
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
