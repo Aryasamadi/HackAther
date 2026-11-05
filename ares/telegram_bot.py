@@ -547,7 +547,12 @@ class ARESBot:
                 pending["step"] = "instruction"
                 await self.render_menu(
                     chat_id,
-                    "<b>Scan instructions</b>\nSend optional focus instructions, credentials or test context. Send <code>-</code> to use engine defaults.",
+                    "<b>Scan instructions · optional</b>\n"
+                    "Tell Strix what to focus on and what to avoid.\n"
+                    "<i>Example:</i> Focus on login, access control and input validation. "
+                    "Check exposed API endpoints. Use non-destructive tests only; do not change or delete data.\n\n"
+                    "If you do not have special instructions, send <code>-</code> and Strix will use its defaults.\n"
+                    "Do not send personal or production passwords/API keys here. If authenticated testing is needed, use a dedicated test account only.",
                     [[_button("Cancel", "scan:cancel")]],
                 )
                 return True
@@ -1250,6 +1255,10 @@ class ARESBot:
         if chat.get("type") != "private":
             return
         chat_id = int(chat.get("id", self.config.admin_id))
+        # A user message starts a fresh response panel below that message.
+        # Keep edit-in-place behavior for subsequent inline-button interactions.
+        self.state["ui_message_id"] = None
+        self.state["ui_chat_id"] = chat_id
         pending = self.state.get("pending")
         document = message.get("document")
         if (
