@@ -6,6 +6,7 @@ import json
 import httpx
 import pytest
 
+from ares.crypto import encrypt_snapshot
 from ares.snapshot_store import SnapshotStore
 
 
@@ -47,7 +48,12 @@ async def test_snapshot_store_saves_and_restores_encrypted_payload(tmp_path) -> 
     store._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     source = tmp_path / "strix-runs.enc"
-    expected = b"ARESS1" + (b"encrypted-strix-history" * 20)
+    expected = encrypt_snapshot(
+        b"compressed-strix-history",
+        bot_token="test-token",
+        repository="owner/repo",
+        admin_id=123,
+    )
     source.write_bytes(expected)
     restored = tmp_path / "restored.enc"
 
@@ -62,8 +68,6 @@ async def test_snapshot_store_saves_and_restores_encrypted_payload(tmp_path) -> 
 
 @pytest.mark.asyncio
 async def test_missing_durable_snapshot_preserves_legacy_artifact(tmp_path) -> None:
-    import httpx
-
     store = SnapshotStore(
         bot_token="test-token",
         admin_id=123,
