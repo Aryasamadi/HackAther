@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from ares.config import Config
-from ares.providers import discover_models, new_provider, parse_provider_descriptor
+from ares.providers import discover_models, new_provider
 from ares.snapshot import restore_snapshot
 from ares.state_store import StateStore
 from ares.strix_adapter import StrixAdapter
@@ -339,6 +339,17 @@ class ARESBot:
             if step == "name":
                 if not value or len(value) > 64:
                     await self.render_menu(chat_id, "⚠️ Provider name must be between 1 and 64 characters.\nEnter the name.", [[_button("Cancel", "provider:cancel")]])
+                    return True
+                providers = self.state.get("providers", {})
+                if isinstance(providers, dict) and any(
+                    isinstance(item, dict) and str(item.get("name", "")).casefold() == value.casefold()
+                    for item in providers.values()
+                ):
+                    await self.render_menu(
+                        chat_id,
+                        f"⚠️ Provider name <b>{_h(value)}</b> already exists. Choose another name.",
+                        [[_button("Cancel", "provider:cancel")]],
+                    )
                     return True
                 pending["name"] = value
                 pending["step"] = "base_url"
