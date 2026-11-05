@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import tarfile
+import tempfile
 from pathlib import Path
 
 from ares.crypto import decrypt_snapshot, encrypt_snapshot
@@ -15,8 +16,7 @@ def create_snapshot(
     repository: str,
     admin_id: int,
 ) -> bool:
-    if not source_dir.is_dir():
-        return False
+    source_dir.mkdir(parents=True, exist_ok=True)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         archive.add(source_dir, arcname="strix_runs", recursive=True)
@@ -27,11 +27,25 @@ def create_snapshot(
         admin_id=admin_id,
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(encrypted)
+    temporary_path: Path | None = None
     try:
-        destination.chmod(0o600)
-    except OSError:
-        pass
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(encrypted)
+            temporary_path = Path(temporary_file.name)
+        try:
+            temporary_path.chmod(0o600)
+        except OSError:
+            pass
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return True
 
 
