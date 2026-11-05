@@ -11,30 +11,64 @@ from ares.snapshot_store import SnapshotStore
 
 
 @pytest.mark.asyncio
-async def test_snapshot_store_saves_and_restores_encrypted_payload(tmp_path) -> None:
+async def test_snapshot_store_rotates_and_restores_encrypted_release_asset(tmp_path) -> None:
+    release: dict[str, object] | None = None
     remote_payload: bytes | None = None
-    remote_sha = "snapshot-blob-sha"
+    next_asset_id = 100
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal remote_payload
-        if request.method == "GET" and request.url.path.endswith("/contents/.ares/strix-runs.enc"):
-            if remote_payload is None:
+        nonlocal release, remote_payload, next_asset_id
+
+        if request.method == "GET" and request.url.path.endswith(
+            "/releases/tags/ares-state-snapshot"
+        ):
+            if release is None:
                 return httpx.Response(404, json={"message": "Not Found"})
+            return httpx.Response(200, json=release)
+
+        if request.method == "POST" and request.url.path.endswith("/releases"):
+            release = {
+                "id": 77,
+                "upload_url": (
+                    "https://uploads.github.com/repos/owner/repo/releases/77/assets"
+                    "{?name,label}"
+                ),
+                "assets": [],
+            }
+            return httpx.Response(201, json=release)
+
+        if request.method == "POST" and request.url.host == "uploads.github.com":
+            assert release is not None
+            remote_payload = request.content
+            next_asset_id += 1
+            asset = {
+                "id": next_asset_id,
+                "name": request.url.params["name"],
+                "state": "uploaded",
+                "created_at": f"2026-11-06T00:00:{next_asset_id % 60:02d}Z",
+            }
+            assets = release["assets"]
+            assert isinstance(assets, list)
+            assets.append(asset)
+            return httpx.Response(201, json=asset)
+
+        if request.method == "GET" and "/releases/assets/" in request.url.path:
+            if remote_payload is None:
+                return httpx.Response(404)
             return httpx.Response(
                 200,
-                json={
-                    "sha": remote_sha,
-                    "encoding": "base64",
-                    "content": base64.b64encode(remote_payload).decode("ascii"),
-                },
+                content=remote_payload,
+                headers={"Content-Type": "application/octet-stream"},
             )
-        if request.method == "PUT" and request.url.path.endswith("/contents/.ares/strix-runs.enc"):
-            body = json.loads(request.content)
-            remote_payload = base64.b64decode(body["content"])
-            return httpx.Response(
-                201,
-                json={"content": {"sha": remote_sha}},
-            )
+
+        if request.method == "DELETE" and "/releases/assets/" in request.url.path:
+            assert release is not None
+            asset_id = int(request.url.path.rsplit("/", 1)[-1])
+            assets = release["assets"]
+            assert isinstance(assets, list)
+            release["assets"] = [asset for asset in assets if asset["id"] != asset_id]
+            return httpx.Response(204)
+
         return httpx.Response(404, json={"message": "Unexpected request"})
 
     store = SnapshotStore(
@@ -45,29 +79,46 @@ async def test_snapshot_store_saves_and_restores_encrypted_payload(tmp_path) -> 
         branch="main",
     )
     await store._client.aclose()
-    store._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
 
     source = tmp_path / "strix-runs.enc"
-    expected = encrypt_snapshot(
-        b"compressed-strix-history",
+    restored = tmp_path / "restored.enc"
+    first = encrypt_snapshot(
+        b"first-strix-history",
         bot_token="test-token",
         repository="owner/repo",
         admin_id=123,
     )
-    source.write_bytes(expected)
-    restored = tmp_path / "restored.enc"
+    second = encrypt_snapshot(
+        b"second-strix-history",
+        bot_token="test-token",
+        repository="owner/repo",
+        admin_id=123,
+    )
 
     try:
+        source.write_bytes(first)
         await store.save(source)
-        assert remote_payload == expected
+        source.write_bytes(second)
+        await store.save(source)
+
+        assert remote_payload == second
+        assert release is not None
+        assets = release["assets"]
+        assert isinstance(assets, list)
+        assert len(assets) == 1
+
         assert await store.restore(restored) is True
-        assert restored.read_bytes() == expected
+        assert restored.read_bytes() == second
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_missing_durable_snapshot_preserves_legacy_artifact(tmp_path) -> None:
+async def test_missing_release_preserves_legacy_artifact(tmp_path) -> None:
     store = SnapshotStore(
         bot_token="test-token",
         admin_id=123,
