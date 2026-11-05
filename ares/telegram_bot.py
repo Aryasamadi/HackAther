@@ -656,7 +656,7 @@ class ARESBot:
         )
         live_message = await self.send(
             chat_id,
-            self._live_message_text("pending", "Preparing", ["Checking model connection and preparing the scan…"]),
+            self._live_message_text("pending", "Preparing", []),
         )
         live_message_id = live_message.get("message_id")
         if not isinstance(live_message_id, int):
@@ -717,7 +717,7 @@ class ARESBot:
             await self.edit(
                 chat_id,
                 message_id,
-                self._live_message_text("startup", "Failed", [str(exc)[:1200]]),
+                self._live_message_text("startup", "Failed", []),
             )
             await self.render_menu(
                 chat_id,
@@ -748,7 +748,7 @@ class ARESBot:
         )
         live_message = await self.send(
             chat_id,
-            self._live_message_text(run_name, "Resuming", ["Loading the saved Strix run…"]),
+            self._live_message_text(run_name, "Resuming", []),
         )
         message_id = live_message.get("message_id")
         if not isinstance(message_id, int):
@@ -795,7 +795,7 @@ class ARESBot:
             await self.edit(
                 chat_id,
                 message_id,
-                self._live_message_text(run_name, "Resume failed", [str(exc)[:1200]]),
+                self._live_message_text(run_name, "Resume failed", []),
             )
             await self.render_menu(
                 chat_id,
@@ -827,7 +827,7 @@ class ARESBot:
     ) -> str:
         """Render only readable text inside Telegram's expandable quote."""
         body = "\n\n".join(line for line in lines if line)
-        body = _clip_utf16(body or "Waiting for assistant text…", MAX_TELEGRAM_TEXT)
+        body = _clip_utf16(body or "\u200b", MAX_TELEGRAM_TEXT)
         return f"<blockquote expandable>{_h(body)}</blockquote>"
 
     @staticmethod
@@ -884,7 +884,7 @@ class ARESBot:
         async def render_assistant_text(snapshot: dict[str, Any]) -> None:
             transcript = self._assistant_live_text(snapshot.get("events", []))
             if not transcript:
-                transcript = "Waiting for assistant text…"
+                transcript = "\u200b"
             chunks = _split_utf16(transcript, MAX_TELEGRAM_TEXT)
             for index, chunk in enumerate(chunks):
                 rendered = self._live_message_text(run_name, "", [chunk], index + 1)
