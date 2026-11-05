@@ -1017,7 +1017,8 @@ class ARESBot:
         if not isinstance(findings, list) or not findings:
             return False
         lines = ["Strix findings", f"Total: {len(findings)}"]
-        for index, item in enumerate(findings[:40], start=1):
+        rows: list[list[dict[str, str]]] = []
+        for index, item in enumerate(findings[:40]):
             if not isinstance(item, dict):
                 continue
             title = str(item.get("title", "Untitled finding"))
@@ -1025,10 +1026,11 @@ class ARESBot:
             target = str(item.get("target") or "not specified")
             endpoint = str(item.get("endpoint") or "not specified")
             lines.append(
-                f"{index}. [{severity}] {title}\n"
-                f"Target: {target}\nEndpoint: {endpoint}"
+                f"{index + 1}. [{severity}] {title}\\n"
+                f"Target: {target}\\nEndpoint: {endpoint}"
             )
-        await self.send_long(chat_id, "\n\n".join(lines))
+            rows.append([_button(f"{severity} · {title}"[:60], f"finding:view:{index}")])
+        await self.send_long(chat_id, "\\n\\n".join(lines), rows or None)
         return True
 
     async def _show_events(self, chat_id: int) -> None:
