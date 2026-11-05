@@ -68,12 +68,19 @@ See docs/FEATURE_PARITY.md for the current capability-by-capability status and k
 
 ## GitHub-hosted runner lifecycle
 
-GitHub-hosted runners are temporary and have a finite job lifetime. The runtime is deliberately bounded below the workflow timeout. Scheduled workflow runs provide the next worker session. Telegram update offsets and Provider/MCP records are encrypted and committed to .ares/state.enc; Strix run directories are archived with authenticated encryption into a workflow artifact before shutdown and restored by the next worker.
+GitHub-hosted runners are temporary. ARES therefore treats each workflow run as a replaceable worker, not as permanent storage. Telegram update offsets and Provider/MCP records are encrypted and committed to `.ares/state.enc`. Strix run directories are archived with authenticated encryption and checkpointed to `.ares/strix-runs.enc` in the repository through the GitHub Contents API.
 
-The next worker searches completed runtime runs for the newest unexpired, non-empty history artifact. If earlier runtime runs exist but no usable snapshot can be recovered, startup is refused instead of silently presenting a blank history. This is file-backed history, not a separate database. An encrypted empty snapshot is also written on first boot, so a genuinely empty history is distinguishable from a missing backup.
+While a scan is active, ARES writes a durable checkpoint every two minutes, immediately after a scan starts or resumes, after a manual stop, and during graceful worker shutdown. The latest complete checkpoint remains in repository storage independently of the Actions run that produced it. The workflow artifact `ares-strix-state` is retained as a secondary, 30-day compatibility fallback; it is no longer the primary source of truth.
 
-A scan that is still active during a worker handoff is stopped gracefully. Its Strix run data is carried into the next runner and can be resumed from Scan history when Strix marks it resumable. This is durable handoff, not a claim of a permanently running server: GitHub scheduling can be delayed and scheduled jobs can be dropped during heavy load.
+The encrypted lifecycle record distinguishes four intents:
+- `running`: a scan was active; after an unexpected worker loss, ARES may attempt automatic recovery.
+- `handoff`: the worker is shutting down normally; the next worker may attempt automatic recovery.
+- `manual_stop`: the operator explicitly stopped the scan in Telegram; the next worker must not restart it automatically. The saved run remains in Scan history and can be resumed manually when Strix marks it resumable.
+- `completed`: the scan finished; the next worker starts normally without resuming it.
 
+On startup, ARES first validates and restores the durable repository snapshot, then falls back to a legacy Actions artifact when needed. If earlier runtime runs exist but neither source can be restored, startup is refused rather than silently opening an empty history. Automatic Resume is attempted only for a recorded `running` or `handoff` run that Strix itself marks resumable; failed recovery is recorded as `recovery_required` to avoid an endless restart loop.
+
+The workflow uses non-cancelling concurrency so a new worker cannot automatically kill the current worker before its shutdown hooks can run. Scheduled handoffs remain subject to GitHub scheduling delays and dropped scheduled events; repository checkpoints protect the latest saved state, but cannot preserve activity that has not yet reached a checkpoint.
 ## Security notes
 
 - Provider and MCP records are encrypted with AES-GCM. The encryption key is derived from the Telegram bot token, repository identity and admin ID; rotating the bot token without migrating the encrypted state makes old state unreadable.
