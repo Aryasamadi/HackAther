@@ -82,3 +82,26 @@ def test_home_menu_places_live_control_before_models() -> None:
 
     assert keyboard[0][1]["callback_data"] == "run:dashboard"
     assert keyboard[1][0]["callback_data"] == "models:list"
+
+
+def test_refresh_provider_catalog_updates_saved_model_list() -> None:
+    bot = object.__new__(ARESBot)
+    bot.state = {
+        "providers": {
+            "provider-1": {
+                "base_url": "https://api.example.test/v1",
+                "api_key": "secret-token",
+                "models": ["old/model"],
+            }
+        }
+    }
+    discover = AsyncMock(return_value=["new/model"])
+
+    from unittest.mock import patch
+
+    with patch("ares.telegram_bot.discover_models", discover):
+        count = asyncio.run(bot._refresh_provider_catalog("provider-1"))
+
+    assert count == 1
+    assert bot.state["providers"]["provider-1"]["models"] == ["new/model"]
+    discover.assert_awaited_once_with("https://api.example.test/v1", "secret-token")
