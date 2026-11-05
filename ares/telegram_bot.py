@@ -1863,6 +1863,7 @@ async def async_main() -> None:
         branch=config.github_ref,
         local_path=config.state_path,
     )
+    state: dict[str, Any] | None = None
     try:
         state = await store.load()
         bot = ARESBot(config, store, state, snapshot_store=snapshot_store)
@@ -1873,7 +1874,8 @@ async def async_main() -> None:
             await bot.close()
     finally:
         try:
-            await store.save(state if "state" in locals() else {})
+            if state is not None:
+                await store.save(state)
         finally:
             await store.close()
             await snapshot_store.close()
