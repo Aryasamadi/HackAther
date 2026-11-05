@@ -19,9 +19,9 @@ Only add these two repository Actions secrets:
 1. TELEGRAM_BOT_TOKEN
 2. ADMIN_ID
 
-The workflow receives GITHUB_TOKEN and GITHUB_REPOSITORY automatically from GitHub Actions. The workflow grants the built-in token contents:write to store the encrypted ARES state file. No PAT or third user-managed secret is required.
+The workflow receives GITHUB_TOKEN and GITHUB_REPOSITORY automatically from GitHub Actions. The workflow grants the built-in token contents:write to store encrypted ARES state and manage the encrypted Strix snapshot release asset. No PAT or third user-managed secret is required.
 
-Run the workflow manually from Actions, or use the five-minute schedule on the default branch. Code deployments to main stop the previous runtime worker, restore the most recent encrypted Strix run snapshot and start the updated bot. Commits that only update encrypted state are excluded from the push trigger.
+Run the workflow manually from Actions, or use the five-minute schedule on the default branch. Runtime workflows share a non-cancelling concurrency group: a deployment-triggered run waits for the current worker to finish its graceful handoff instead of force-cancelling it. The next worker restores the most recent encrypted Strix snapshot before starting the updated bot. Commits that only update encrypted state are excluded from the push trigger.
 
 ## Provider setup
 
@@ -68,7 +68,7 @@ See docs/FEATURE_PARITY.md for the current capability-by-capability status and k
 
 ## GitHub-hosted runner lifecycle
 
-GitHub-hosted runners are temporary. ARES therefore treats each workflow run as a replaceable worker, not as permanent storage. Telegram update offsets and Provider/MCP records are encrypted and committed to `.ares/state.enc`. Strix run directories are archived with authenticated encryption and checkpointed as a rotating asset in the fixed GitHub pre-release `ares-state-snapshot`. The new asset is uploaded and verified before older snapshot assets are removed, so checkpoints do not create an ever-growing Git commit history.
+GitHub-hosted runners are temporary. ARES therefore treats each workflow run as a replaceable worker, not as permanent storage. Telegram update offsets and Provider/MCP records are encrypted and committed to `.ares/state.enc`. Strix run directories are archived with authenticated encryption and checkpointed as a rotating asset in the fixed GitHub pre-release `ares-state-snapshot`. The new asset is uploaded successfully before older snapshot assets are removed, so checkpoints do not create an ever-growing Git commit history.
 
 While a scan is active, ARES writes a durable checkpoint every two minutes, immediately after a scan starts or resumes, after a manual stop, and during graceful worker shutdown. The latest complete checkpoint remains in repository storage independently of the Actions run that produced it. The workflow artifact `ares-strix-state` is retained as a secondary, 30-day compatibility fallback; it is no longer the primary source of truth.
 
@@ -84,7 +84,7 @@ The workflow uses non-cancelling concurrency so a new worker cannot automaticall
 ## Security notes
 
 - Provider and MCP records are encrypted with AES-GCM. The encryption key is derived from the Telegram bot token, repository identity and admin ID; rotating the bot token without migrating the encrypted state makes old state unreadable.
-- The Strix run snapshot is also encrypted before it is uploaded as a GitHub Actions artifact.
+- The Strix run snapshot is encrypted with AES-GCM and stored as a rotating GitHub Release asset; the Actions artifact is only a secondary compatibility fallback.
 - Never print tokens in logs. Use a private Telegram chat for credentials. Telegram bot chats are not end-to-end encrypted.
 - Only the configured Telegram user ID is authorized to operate the bot.
 - Uploaded Telegram workspace files are saved on the temporary runner and passed to the Strix sandbox as workspace context.
