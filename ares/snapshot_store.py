@@ -8,9 +8,11 @@ from pathlib import Path
 
 import httpx
 
+from ares.crypto import decrypt_snapshot
+
 
 _SNAPSHOT_MAGIC = b"ARESS1"
-_MAX_SNAPSHOT_BYTES = 90 * 1024 * 1024
+_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
 class SnapshotStore:
@@ -107,6 +109,18 @@ class SnapshotStore:
                 "The durable Strix snapshot exists but has an invalid encrypted format; "
                 "the existing remote file was not overwritten."
             )
+        try:
+            decrypt_snapshot(
+                payload,
+                bot_token=self.bot_token,
+                repository=self.repository,
+                admin_id=self.admin_id,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "The durable Strix snapshot failed authenticated decryption; "
+                "the existing remote file was not overwritten."
+            ) from exc
         return payload
 
     async def restore(self, destination: Path) -> bool:
@@ -159,6 +173,12 @@ class SnapshotStore:
                 "Encrypted Strix snapshot exceeds the safe GitHub Contents API limit; "
                 "the previous durable snapshot was left untouched."
             )
+        decrypt_snapshot(
+            payload,
+            bot_token=self.bot_token,
+            repository=self.repository,
+            admin_id=self.admin_id,
+        )
 
         encoded = base64.b64encode(payload).decode("ascii")
         async with self._lock:
