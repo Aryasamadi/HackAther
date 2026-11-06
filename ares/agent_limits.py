@@ -6,7 +6,6 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
 from typing import Any
 
 from agents.models.interface import Model
@@ -14,14 +13,6 @@ from openai import APIConnectionError, APITimeoutError
 
 logger = logging.getLogger(__name__)
 
-_active_semaphore: ContextVar[asyncio.Semaphore | None] = ContextVar(
-    "ares_llm_request_semaphore",
-    default=None,
-)
-_active_failover: ContextVar[_FailoverPolicy | None] = ContextVar(
-    "ares_llm_failover_policy",
-    default=None,
-)
 _patch_lock = asyncio.Lock()
 _RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _PRIMARY_COOLDOWN_SECONDS = 60.0
@@ -239,12 +230,8 @@ async def bounded_llm_requests(
 
             return _LimitedModel(model, semaphore)
 
-        token_semaphore = _active_semaphore.set(semaphore)
-        token_failover = _active_failover.set(policy)
         StrixProvider.get_model = _get_limited_model  # type: ignore[method-assign]
         try:
             yield
         finally:
-            _active_failover.reset(token_failover)
-            _active_semaphore.reset(token_semaphore)
             StrixProvider.get_model = original_get_model  # type: ignore[method-assign]
