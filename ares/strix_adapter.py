@@ -108,6 +108,40 @@ class StrixAdapter:
         for key in ("id", "litellm_id", "api_key", "base_url"):
             if not str(fallback_provider.get(key, "")).strip():
                 raise ValueError(f"Fallback provider is missing required field: {key}")
+
+        from strix.config.models import supports_strict_tool_schemas
+
+        route_id = str(fallback_provider["litellm_id"])
+        fallback_ref = (
+            fallback_model
+            if fallback_model.startswith(route_id + "/")
+            else f"{route_id}/{fallback_model}"
+        )
+        if supports_strict_tool_schemas(self._model_ref or "") != supports_strict_tool_schemas(
+            fallback_ref
+        ):
+            raise ValueError(
+                "Primary and backup models must use compatible Strix tool-schema modes. "
+                "Choose two models that both support strict schemas, or two that both "
+                "require non-strict schemas."
+            )
+
+        # The credential-bound secondary StrixProvider uses Chat Completions.
+        # Force the primary route to the same API shape while failover is enabled.
+        if self._config_path is None:
+            raise RuntimeError("Primary model configuration was not initialized")
+        config = json.loads(self._config_path.read_text(encoding="utf-8"))
+        env = config.setdefault("env", {})
+        if not isinstance(env, dict):
+            raise ValueError("Primary Strix configuration has an invalid env block")
+        env["STRIX_API_TYPE"] = "chat_completions"
+        self._config_path.write_text(json.dumps(config), encoding="utf-8")
+        try:
+            self._config_path.chmod(0o600)
+        except OSError:
+            pass
+        apply_config_override(self._config_path)
+
         self._fallback_provider = dict(fallback_provider)
         self._fallback_model = fallback_model
 
