@@ -1,5 +1,3 @@
-import asyncio
-
 import pytest
 from agents.models.interface import Model
 
