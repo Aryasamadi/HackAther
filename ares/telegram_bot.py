@@ -769,8 +769,10 @@ class ARESBot:
             "<b>Provider failover</b>\n"
             f"Primary: <code>{_h(self.state.get('active_model') or 'not selected')}</code>\n"
             f"{fallback_text}\n\n"
-            "Choose a different saved provider, then choose its backup model. "
-            "ARES switches only on temporary capacity, network or server errors."
+            "Choose a different saved provider, then choose a backup model with "
+            "tool/function calling and enough context for the same scan. "
+            "Only temporary provider errors trigger failover; authentication, "
+            "invalid-model, context and policy errors do not."
         )
         if notice:
             menu_text = f"{_h(notice)}\n\n" + menu_text
