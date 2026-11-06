@@ -53,6 +53,9 @@ class StrixAdapter:
         self._scan_mode = "deep"
         self._scope_mode = "auto"
         self._diff_base: str | None = None
+        self._model_ref: str | None = None
+        self._fallback_provider: dict[str, Any] | None = None
+        self._fallback_model: str | None = None
         raw_request_limit = os.environ.get("ARES_MAX_CONCURRENT_LLM_REQUESTS", "2").strip()
         try:
             self.max_concurrent_llm_requests = int(raw_request_limit)
@@ -68,6 +71,7 @@ class StrixAdapter:
     def _configure_model(self, provider: dict[str, Any], model: str) -> None:
         provider_id = str(provider["litellm_id"])
         model_ref = model if model.startswith(provider_id + "/") else f"{provider_id}/{model}"
+        self._model_ref = model_ref
         self._config_path = Path(".ares-runtime") / "strix-cli-config.json"
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         config = {
@@ -83,6 +87,29 @@ class StrixAdapter:
         except OSError:
             pass
         apply_config_override(self._config_path)
+
+    def _configure_failover(
+        self,
+        primary_provider: dict[str, Any],
+        fallback_provider: dict[str, Any] | None,
+        fallback_model: str | None,
+    ) -> None:
+        if (fallback_provider is None) != (fallback_model is None):
+            raise ValueError("Fallback provider and model must be configured together")
+        self._fallback_provider = None
+        self._fallback_model = None
+        if fallback_provider is None or fallback_model is None:
+            return
+        if fallback_provider.get("id") == primary_provider.get("id"):
+            raise ValueError("Fallback provider must be different from the primary provider")
+        models = fallback_provider.get("models", [])
+        if not isinstance(models, list) or fallback_model not in models:
+            raise ValueError("Configured fallback model is no longer in the provider catalog")
+        for key in ("id", "litellm_id", "api_key", "base_url"):
+            if not str(fallback_provider.get(key, "")).strip():
+                raise ValueError(f"Fallback provider is missing required field: {key}")
+        self._fallback_provider = dict(fallback_provider)
+        self._fallback_model = fallback_model
 
     @staticmethod
     def _build_mcp_requests(
@@ -164,6 +191,8 @@ class StrixAdapter:
         instruction: str,
         provider: dict[str, Any],
         model: str,
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
         scan_mode: str = "deep",
         scope_mode: str = "auto",
         diff_base: str | None = None,
@@ -183,6 +212,7 @@ class StrixAdapter:
         if scope_mode not in {"auto", "diff", "full"}:
             raise ValueError("Unsupported Strix scope mode")
         self._configure_model(provider, model)
+        self._configure_failover(provider, fallback_provider, fallback_model)
         settings = load_settings()
         await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
         args = self._args(
@@ -213,6 +243,8 @@ class StrixAdapter:
         run_name: str,
         provider: dict[str, Any],
         model: str,
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
         max_budget_usd: float | None = None,
         max_turns: int = 500,
         mcp_servers: list[dict[str, Any]] | None = None,
@@ -222,6 +254,7 @@ class StrixAdapter:
         if self.running:
             raise RuntimeError("A Strix scan is already running")
         self._configure_model(provider, model)
+        self._configure_failover(provider, fallback_provider, fallback_model)
         settings = load_settings()
         await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
         args = self._args(
@@ -291,7 +324,12 @@ class StrixAdapter:
                 "Applying scan-wide LLM request limit: %d",
                 self.max_concurrent_llm_requests,
             )
-            async with bounded_llm_requests(self.max_concurrent_llm_requests):
+            async with bounded_llm_requests(
+                self.max_concurrent_llm_requests,
+                primary_model_ref=self._model_ref,
+                fallback_provider=self._fallback_provider,
+                fallback_model=self._fallback_model,
+            ):
                 await run_strix_scan(
                     scan_config=self.scan_config,
                     scan_id=self.run_name,
