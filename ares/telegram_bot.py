@@ -104,10 +104,24 @@ class TelegramAPI:
         *,
         allow_plain_fallback: bool = True,
     ) -> Any:
+        payload = dict(payload or {})
+        if method in {"sendMessage", "editMessageText"}:
+            message_text = payload.get("text")
+            has_visible_text = (
+                isinstance(message_text, str)
+                and bool(message_text.strip())
+                and bool(self._plain_message_text(message_text).strip())
+            )
+            if not has_visible_text:
+                logger.warning(
+                    "Blocked empty Telegram %s payload; sending a safe placeholder",
+                    method,
+                )
+                payload["text"] = "ARES: no message content was available."
         try:
             response = await self.client.post(
                 f"{self.base}/{method}",
-                json=payload or {},
+                json=payload,
             )
         except httpx.HTTPError as exc:
             safe_error = self._redact_token_from_error(str(exc))
