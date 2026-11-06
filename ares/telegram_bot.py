@@ -63,6 +63,43 @@ def _h(value: object) -> str:
     return html.escape(str(value), quote=False)
 
 
+def _format_structured_value(value: Any, *, depth: int = 0) -> str:
+    """Render nested finding evidence as readable Telegram text, not raw JSON."""
+    if depth >= 4:
+        return str(value)[:1200]
+    if isinstance(value, dict):
+        if not value:
+            return "No details"
+        lines: list[str] = []
+        entries = list(value.items())
+        for key, item in entries[:30]:
+            label = re.sub(r"[_-]+", " ", str(key)).strip().capitalize() or "Detail"
+            rendered = _format_structured_value(item, depth=depth + 1)
+            if "\\n" in rendered:
+                indented = "\\n".join(f"  {line}" for line in rendered.splitlines())
+                lines.append(f"{label}:\\n{indented}")
+            else:
+                lines.append(f"{label}: {rendered}")
+        if len(entries) > 30:
+            lines.append(f"… {len(entries) - 30} more fields omitted")
+        return "\\n".join(lines)
+    if isinstance(value, list):
+        if not value:
+            return "No items"
+        items = [
+            "• " + _format_structured_value(item, depth=depth + 1).replace("\\n", "\\n  ")
+            for item in value[:20]
+        ]
+        if len(value) > 20:
+            items.append(f"• … {len(value) - 20} more items omitted")
+        return "\\n".join(items)
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return str(value)
+
+
 def _button(text: str, callback_data: str) -> dict[str, str]:
     return {"text": text, "callback_data": callback_data}
 
@@ -1407,7 +1444,7 @@ class ARESBot:
             value = finding.get(key)
             if value:
                 if isinstance(value, (dict, list)):
-                    value = json.dumps(value, ensure_ascii=False, indent=2)
+                    value = _format_structured_value(value)
                 chunks.append(f"{label}\n{str(value)}")
         await self.send_long(chat_id, "\n\n".join(chunks))
 
