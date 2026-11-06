@@ -297,4 +297,4 @@ async def test_failed_adapter_stop_is_not_reported_as_stopped() -> None:
 
     assert bot.state["scan_control"]["intent"] == "recovery_required"
     assert bot.state["scan_control"]["status"] == "stop_failed"
-    bot.store.save.assert_awaited_once()
+    assert bot.store.save.await_count == 2
