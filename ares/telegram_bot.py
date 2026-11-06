@@ -1113,7 +1113,7 @@ class ARESBot:
     ) -> str:
         """Render only readable text inside Telegram's expandable quote."""
         body = "\n\n".join(line for line in lines if line)
-        body = _clip_utf16(body or "\u200b", MAX_TELEGRAM_TEXT)
+        body = _clip_utf16(body or "⏳ Waiting for Strix output…", MAX_TELEGRAM_TEXT)
         return f"<blockquote expandable>{_h(body)}</blockquote>"
 
     @staticmethod

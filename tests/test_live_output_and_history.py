@@ -230,3 +230,14 @@ def test_missing_legacy_history_preserves_explicit_terminal_intent(
 
     assert ARESBot._mark_unavailable_history(state) is None
     assert state["scan_control"] is control
+
+
+def test_live_message_uses_visible_placeholder_before_first_output() -> None:
+    message = ARESBot._live_message_text("run-123", "Preparing", [])
+    quote = re.search(r"<blockquote expandable>(.*?)</blockquote>", message)
+
+    assert quote is not None
+    visible = html.unescape(quote.group(1))
+    assert visible == "⏳ Waiting for Strix output…"
+    assert "\u200b" not in visible
+    assert ARESBot._has_visible_message_text(message) is True
