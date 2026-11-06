@@ -577,6 +577,25 @@ class ARESBot:
         provider = providers.get(provider_id) if isinstance(providers, dict) else None
         return provider if isinstance(provider, dict) else None
 
+    def _fallback_selection(self) -> tuple[dict[str, Any], str] | None:
+        providers = self.state.get("providers", {})
+        if not isinstance(providers, dict):
+            return None
+        provider_id = self.state.get("fallback_provider_id")
+        model = self.state.get("fallback_model")
+        if (
+            not isinstance(provider_id, str)
+            or provider_id == self.state.get("active_provider_id")
+            or not isinstance(model, str)
+            or not model
+        ):
+            return None
+        provider = providers.get(provider_id)
+        models = provider.get("models", []) if isinstance(provider, dict) else []
+        if not isinstance(provider, dict) or not isinstance(models, list) or model not in models:
+            return None
+        return provider, model
+
     async def _show_mcp_menu(self, chat_id: int) -> None:
         servers = self.state.get("mcp_servers", [])
         rows: list[list[dict[str, str]]] = []
@@ -640,12 +659,20 @@ class ARESBot:
                 count = len(item.get("models", [])) if isinstance(item.get("models"), list) else 0
                 active = " ✓" if provider_id == self.state.get("active_provider_id") else ""
                 rows.append([_button(f"{name}{active} · {count} models"[:60], f"provider:view:{provider_id}")])
+        fallback = self._fallback_selection()
+        fallback_label = (
+            f"Enabled · {fallback[0].get('name', 'Provider')} / {fallback[1]}"
+            if fallback
+            else "Not configured"
+        )
+        rows.append([_button("🛟 Configure provider failover", "failover:settings")])
         rows.append([_button("➕ Add model provider", "provider:add")])
         rows.append([_button("⬅️ Main menu", "menu:home")])
         await self.render_menu(
             chat_id,
-            "<b>Models</b>\n"
-            "Select a provider to browse its discovered models.\n"
+            "<b>Models</b>\\n"
+            "Select a provider to browse its discovered models.\\n"
+            f"<b>Backup route:</b> {_h(fallback_label)}\\n"
             "Add a provider using its name, Base URL and token.",
             rows,
         )
@@ -706,6 +733,98 @@ class ARESBot:
         )
         if notice:
             menu_text = f"{_h(notice)}\n\n" + menu_text
+        await self.render_menu(chat_id, menu_text, rows)
+
+    async def _failover_menu(self, chat_id: int, *, notice: str | None = None) -> None:
+        providers = self.state.get("providers", {})
+        if not isinstance(providers, dict):
+            providers = {}
+        primary_id = self.state.get("active_provider_id")
+        fallback = self._fallback_selection()
+        rows: list[list[dict[str, str]]] = []
+        if fallback:
+            rows.append([_button("🛑 Disable failover", "failover:disable")])
+        for provider_id, provider in providers.items():
+            if not isinstance(provider, dict) or provider_id == primary_id:
+                continue
+            name = str(provider.get("name", provider_id))
+            count = len(provider.get("models", [])) if isinstance(provider.get("models"), list) else 0
+            selected = " ✓" if fallback and fallback[0].get("id") == provider.get("id") else ""
+            rows.append([
+                _button(
+                    f"Backup: {name}{selected} · {count} models"[:60],
+                    f"failover:provider:{provider_id}",
+                )
+            ])
+        if not any(row for row in rows if row[0]["callback_data"] != "failover:disable"):
+            rows.append([_button("➕ Add another provider", "provider:add")])
+        rows.append([_button("⬅️ Models", "models:list")])
+        fallback_text = (
+            f"<b>Selected backup:</b> {_h(fallback[0].get('name', 'Provider'))} "
+            f"/ <code>{_h(fallback[1])}</code>"
+            if fallback
+            else "<b>Selected backup:</b> Not configured"
+        )
+        menu_text = (
+            "<b>Provider failover</b>\\n"
+            f"Primary: <code>{_h(self.state.get('active_model') or 'not selected')}</code>\\n"
+            f"{fallback_text}\\n\\n"
+            "Choose a different saved provider, then choose its backup model. "
+            "ARES switches only on temporary capacity, network or server errors."
+        )
+        if notice:
+            menu_text = f"{_h(notice)}\\n\\n" + menu_text
+        await self.render_menu(chat_id, menu_text, rows)
+
+    async def _fallback_provider_models(
+        self,
+        chat_id: int,
+        provider_id: str,
+        page: int = 0,
+        *,
+        notice: str | None = None,
+    ) -> None:
+        providers = self.state.get("providers", {})
+        provider = providers.get(provider_id) if isinstance(providers, dict) else None
+        if not isinstance(provider, dict) or provider_id == self.state.get("active_provider_id"):
+            await self._failover_menu(chat_id, notice="Choose a provider different from the active primary.")
+            return
+        models = provider.get("models", [])
+        if not isinstance(models, list):
+            models = []
+        page_size = 10
+        page_count = max(1, (len(models) + page_size - 1) // page_size)
+        page = max(0, min(page, page_count - 1))
+        start = page * page_size
+        visible = models[start : start + page_size]
+        rows: list[list[dict[str, str]]] = []
+        for index in range(0, len(visible), 2):
+            row = []
+            for local_index, model in enumerate(visible[index : index + 2], start=index):
+                model_index = start + local_index
+                row.append(
+                    _button(
+                        model_button_label(provider, model),
+                        f"failover:model:{provider_id}:{model_index}",
+                    )
+                )
+            rows.append(row)
+        navigation: list[dict[str, str]] = []
+        if page > 0:
+            navigation.append(_button("⬅️ Previous", f"failover:page:{provider_id}:{page - 1}"))
+        if page + 1 < page_count:
+            navigation.append(_button("Next ➡️", f"failover:page:{provider_id}:{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+        rows.append([_button("⬅️ Backup providers", "failover:settings")])
+        model_range = f"{start + 1}–{start + len(visible)} of {len(models)}" if models else "No models discovered"
+        menu_text = (
+            f"<b>Backup model · {_h(provider.get('name', provider_id))}</b>\\n"
+            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\\n"
+            "Choose the model to use only when the primary provider is temporarily unavailable."
+        )
+        if notice:
+            menu_text = f"{_h(notice)}\\n\\n" + menu_text
         await self.render_menu(chat_id, menu_text, rows)
 
     async def _begin_provider(self, chat_id: int) -> None:
