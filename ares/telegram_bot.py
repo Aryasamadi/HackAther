@@ -175,6 +175,28 @@ class ARESBot:
             and bool(control.get("run_name"))
         )
 
+    @staticmethod
+    def _mark_unavailable_history(state: dict[str, Any]) -> str | None:
+        """Prevent an unrecoverable pre-checkpoint run from being auto-resumed."""
+        run_name = state.get("active_run")
+        if not isinstance(run_name, str) or not run_name:
+            return None
+        control = state.get("scan_control")
+        if isinstance(control, dict) and control.get("intent") in {
+            "manual_stop",
+            "completed",
+        }:
+            return None
+        now = int(time.time())
+        state["scan_control"] = {
+            "run_name": run_name,
+            "intent": "recovery_required",
+            "status": "history_unavailable_before_durable_checkpoints",
+            "started_at": now,
+            "updated_at": now,
+        }
+        return run_name
+
     async def recover_interrupted_scan(self) -> None:
         control = self.state.get("scan_control")
         if not self._should_auto_resume(control):
@@ -1835,38 +1857,20 @@ async def async_main() -> None:
         branch=config.github_ref,
     )
 
-    # Prefer durable repository storage. The Actions artifact remains a legacy fallback.
-    try:
-        remote_restored = await snapshot_store.restore(remote_snapshot_path)
-    except Exception:
-        remote_restored = False
-        logger.exception(
-            "Durable Strix snapshot could not be read; trying the legacy Actions artifact"
-        )
+    # Prefer durable repository storage. API/authentication errors are fatal:
+    # only an actual missing release may fall back to the legacy Actions artifact.
+    remote_restored = await snapshot_store.restore(remote_snapshot_path)
+    history_recovery_gap = False
     if remote_restored:
-        try:
-            restore_snapshot(
-                remote_snapshot_path,
-                Path("."),
-                bot_token=config.telegram_token,
-                repository=config.github_repository,
-                admin_id=config.admin_id,
-            )
-            remote_snapshot_path.replace(snapshot_path)
-            logger.info("Restored durable encrypted Strix history from repository storage")
-        except Exception:
-            if not snapshot_path.is_file():
-                raise
-            logger.exception(
-                "Durable Strix snapshot could not be restored; trying the legacy Actions artifact"
-            )
-            restore_snapshot(
-                snapshot_path,
-                Path("."),
-                bot_token=config.telegram_token,
-                repository=config.github_repository,
-                admin_id=config.admin_id,
-            )
+        restore_snapshot(
+            remote_snapshot_path,
+            Path("."),
+            bot_token=config.telegram_token,
+            repository=config.github_repository,
+            admin_id=config.admin_id,
+        )
+        remote_snapshot_path.replace(snapshot_path)
+        logger.info("Restored durable encrypted Strix history from repository storage")
     else:
         restored = restore_snapshot(
             snapshot_path,
@@ -1882,12 +1886,14 @@ async def async_main() -> None:
                 os.environ.get("ARES_PREVIOUS_RUNTIME_EXISTS", "false").lower() == "true"
             )
             if previous_runtime_exists:
-                raise RuntimeError(
-                    "Previous ARES runtime history exists, but neither durable repository "
-                    "storage nor a valid legacy Actions artifact could be restored. "
-                    "Refusing to start with an empty history."
+                history_recovery_gap = True
+                logger.error(
+                    "Previous runtime exists but no Strix snapshot survived the old "
+                    "artifact-only retention window. Starting with an explicit recovery "
+                    "gap marker; no previous scan will be auto-resumed."
                 )
-            logger.info("No previous Strix history exists; starting with an empty history")
+            else:
+                logger.info("No previous Strix history exists; starting with an empty history")
 
     store = StateStore(
         bot_token=config.telegram_token,
@@ -1900,8 +1906,39 @@ async def async_main() -> None:
     state: dict[str, Any] | None = None
     try:
         state = await store.load()
+        if history_recovery_gap:
+            missing_run = ARESBot._mark_unavailable_history(state)
+        else:
+            missing_run = None
         bot = ARESBot(config, store, state, snapshot_store=snapshot_store)
         try:
+            if history_recovery_gap:
+                # Establish the first durable baseline before polling Telegram.
+                # If GitHub Release storage is unavailable, do not start an ephemeral worker.
+                try:
+                    await bot._checkpoint_snapshot()
+                    await bot._save_state()
+                except Exception as exc:
+                    logger.exception("Could not establish the initial durable Strix snapshot")
+                    raise RuntimeError(
+                        "ARES cannot start because its first durable encrypted snapshot "
+                        "could not be committed."
+                    ) from exc
+                old_run_text = (
+                    f" Previous run <code>{_h(missing_run)}</code> is marked as "
+                    "recovery-required and will not be auto-resumed."
+                    if missing_run
+                    else ""
+                )
+                await bot.send(
+                    config.admin_id,
+                    "⚠️ <b>Legacy Strix history is unavailable.</b> "
+                    "No unexpired Actions artifact or prior durable snapshot could be "
+                    "recovered. Existing encrypted ARES settings were retained; the "
+                    "missing old Strix run data cannot be reconstructed."
+                    f"{old_run_text} A fresh encrypted durable history baseline has now "
+                    "been created, and this worker can continue safely.",
+                )
             await bot.recover_interrupted_scan()
             await bot.run()
         finally:

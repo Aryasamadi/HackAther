@@ -203,3 +203,30 @@ def test_auto_resume_policy_distinguishes_crash_from_manual_stop(
 def test_auto_resume_policy_requires_a_known_run_name() -> None:
     assert ARESBot._should_auto_resume({"intent": "running", "run_name": ""}) is False
     assert ARESBot._should_auto_resume(None) is False
+
+def test_missing_legacy_history_marks_previous_run_recovery_required() -> None:
+    state = {
+        "active_run": "old-strix-run",
+        "scan_control": {"run_name": "old-strix-run", "intent": "running"},
+    }
+
+    missing_run = ARESBot._mark_unavailable_history(state)
+
+    assert missing_run == "old-strix-run"
+    assert state["scan_control"]["intent"] == "recovery_required"
+    assert (
+        state["scan_control"]["status"]
+        == "history_unavailable_before_durable_checkpoints"
+    )
+    assert ARESBot._should_auto_resume(state["scan_control"]) is False
+
+
+@pytest.mark.parametrize("intent", ["manual_stop", "completed"])
+def test_missing_legacy_history_preserves_explicit_terminal_intent(
+    intent: str,
+) -> None:
+    control = {"run_name": "old-strix-run", "intent": intent}
+    state = {"active_run": "old-strix-run", "scan_control": control}
+
+    assert ARESBot._mark_unavailable_history(state) is None
+    assert state["scan_control"] is control
