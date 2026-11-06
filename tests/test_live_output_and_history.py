@@ -182,3 +182,24 @@ def test_delete_history_item_rejects_path_traversal() -> None:
 
     with pytest.raises(ValueError, match="Invalid run name"):
         adapter.delete_history_item("../other-run")
+
+@pytest.mark.parametrize(
+    ("intent", "expected"),
+    [
+        ("running", True),
+        ("handoff", True),
+        ("manual_stop", False),
+        ("completed", False),
+        ("recovery_required", False),
+    ],
+)
+def test_auto_resume_policy_distinguishes_crash_from_manual_stop(
+    intent: str, expected: bool
+) -> None:
+    control = {"run_name": "scan-123", "intent": intent}
+    assert ARESBot._should_auto_resume(control) is expected
+
+
+def test_auto_resume_policy_requires_a_known_run_name() -> None:
+    assert ARESBot._should_auto_resume({"intent": "running", "run_name": ""}) is False
+    assert ARESBot._should_auto_resume(None) is False
