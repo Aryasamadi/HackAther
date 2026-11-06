@@ -19,6 +19,10 @@ _RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _PRIMARY_COOLDOWN_SECONDS = 60.0
 
 
+class PartialProviderStreamError(RuntimeError):
+    """A provider stream failed after emitting output and must not replay the turn."""
+
+
 def is_transient_provider_error(exc: BaseException) -> bool:
     """Only capacity, timeout, network and transient server errors may fail over."""
     if isinstance(
@@ -127,9 +131,14 @@ class _FailoverModel(Model):
                     emitted = True
                     yield event
             except Exception as exc:
-                # Once a stream has emitted anything, replaying it through another
-                # provider could duplicate visible text or an incomplete tool call.
-                if emitted or not is_transient_provider_error(exc):
+                # Once a stream has emitted anything, the Strix turn retry path
+                # must not replay it: visible text or tool calls may already exist.
+                if emitted:
+                    raise PartialProviderStreamError(
+                        "Primary provider stream failed after partial output; "
+                        "the turn was not replayed to avoid duplicate content."
+                    ) from exc
+                if not is_transient_provider_error(exc):
                     raise
                 self._policy.mark_primary_unavailable(exc)
                 logger.warning("Primary stream failed before output; switching to fallback")
