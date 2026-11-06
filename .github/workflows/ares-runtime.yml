@@ -12,8 +12,10 @@ on:
 
 # New code deployments and manual restarts replace the previous worker.
 # Scheduled handoffs stay serialized and never cancel an active scheduled worker.
+# v2 lets this deployment escape workers queued under the old group name.
+# New deployments replace prior workers; scheduled handoffs remain serialized.
 concurrency:
-  group: ares-runtime
+  group: ares-runtime-v2
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
@@ -43,21 +45,41 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const active = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: "ares-runtime.yml",
-              status: "in_progress",
-              per_page: 20
-            });
-            const previous = active.data.workflow_runs.filter((run) => run.id !== context.runId);
-            for (const run of previous) {
-              core.info(`Cancelling previous ARES run ${run.id} on ${run.head_branch}`);
-              await github.rest.actions.cancelWorkflowRun({
+            const statuses = ["in_progress", "pending", "queued"];
+            const responses = await Promise.all(statuses.map((status) =>
+              github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                run_id: run.id
-              });
+                workflow_id: "ares-runtime.yml",
+                status,
+                per_page: 100
+              })
+            ));
+            const byId = new Map();
+            for (const response of responses) {
+              for (const run of response.data.workflow_runs) {
+                if (run.id !== context.runId) byId.set(run.id, run);
+              }
+            }
+            const previous = Array.from(byId.values());
+            for (const run of previous) {
+              core.info(
+                `Cancelling previous ARES run ${run.id} (${run.status}) on ${run.head_branch}`
+              );
+              try {
+                await github.rest.actions.cancelWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id
+                });
+              } catch (error) {
+                const latest = await github.rest.actions.getWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id
+                });
+                if (latest.data.status !== "completed") throw error;
+              }
             }
             for (const run of previous) {
               let completed = false;
