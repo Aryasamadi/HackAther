@@ -134,3 +134,40 @@ async def test_telegram_replaces_empty_message_text_before_api_call(
         assert sent_payloads[0]["text"] == "ARES: no message content was available."
     finally:
         await api.close()
+
+@pytest.mark.parametrize(
+    "invisible_text",
+    [
+        "",
+        "   ",
+        "<b></b>",
+        "<blockquote expandable></blockquote>",
+        "\u200b",
+        "\ufeff",
+        "\u2060",
+        "\u200e",
+        "&#8203;",
+        "<b>&#8203;</b>",
+        " \u200b\ufeff ",
+    ],
+)
+def test_telegram_visibility_check_rejects_invisible_only_content(
+    invisible_text: str,
+) -> None:
+    assert TelegramAPI._has_visible_message_text(invisible_text) is False
+
+
+@pytest.mark.parametrize(
+    "visible_text",
+    [
+        "Hello",
+        "سلام",
+        "<b>سلام</b>",
+        "✅",
+        "A\u200bB",
+    ],
+)
+def test_telegram_visibility_check_keeps_real_text_and_symbols(
+    visible_text: str,
+) -> None:
+    assert TelegramAPI._has_visible_message_text(visible_text) is True
