@@ -43,6 +43,7 @@ Model pages show ten models at a time in two columns. You can refresh a provider
 - Scan mode: Quick, Standard or Deep.
 - Scope: Auto, Diff or Full, with an optional diff base.
 - Budget and max turns: configured in Settings and passed to Strix's runner.
+- LLM request pressure: `ARES_MAX_CONCURRENT_LLM_REQUESTS` caps in-flight model requests across the scan (default `2`, allowed `1`–`8`). This bounds actual provider calls without blocking Strix's parent/child Agent orchestration.
 - Live controls: inspect agents, inspect events and per-agent transcript, steer or stop an agent, pause/resume budget, stop the run, inspect findings, and view the report.
 
 ## MCP connections
