@@ -1752,6 +1752,41 @@ class ARESBot:
                 await self._consume_pending(chat_id, "-")
             elif data == "models:list":
                 await self._models_menu(chat_id)
+            elif data == "failover:settings":
+                await self._failover_menu(chat_id)
+            elif data == "failover:disable":
+                self.state["fallback_provider_id"] = None
+                self.state["fallback_model"] = None
+                await self._failover_menu(chat_id, notice="Provider failover disabled.")
+            elif action == "failover" and len(parts) == 3 and parts[1] == "provider":
+                provider_id = parts[2]
+                if provider_id == self.state.get("active_provider_id"):
+                    raise ValueError("Backup provider must be different from the active primary.")
+                try:
+                    await self._refresh_provider_catalog(provider_id)
+                except Exception as exc:
+                    logger.warning("Backup provider refresh failed for %s: %s", provider_id, type(exc).__name__)
+                    await self._fallback_provider_models(
+                        chat_id, provider_id, 0,
+                        notice="Could not refresh the catalog; showing saved models.",
+                    )
+                else:
+                    await self._fallback_provider_models(chat_id, provider_id, 0)
+            elif action == "failover" and len(parts) == 4 and parts[1] == "page":
+                await self._fallback_provider_models(chat_id, parts[2], int(parts[3]))
+            elif action == "failover" and len(parts) == 4 and parts[1] == "model":
+                provider_id = parts[2]
+                if provider_id == self.state.get("active_provider_id"):
+                    raise ValueError("Backup provider must be different from the active primary.")
+                providers = self.state.get("providers", {})
+                provider = providers.get(provider_id) if isinstance(providers, dict) else None
+                models = provider.get("models", []) if isinstance(provider, dict) else []
+                index = int(parts[3])
+                if not isinstance(models, list) or not 0 <= index < len(models):
+                    raise ValueError("Backup model selection is no longer valid")
+                self.state["fallback_provider_id"] = provider_id
+                self.state["fallback_model"] = str(models[index])
+                await self._failover_menu(chat_id, notice="Backup model saved.")
             elif data == "provider:add":
                 await self._begin_provider(chat_id)
             elif data == "provider:cancel":
@@ -1821,6 +1856,9 @@ class ARESBot:
                     raise ValueError("Model selection is no longer valid")
                 self.state["active_provider_id"] = parts[2]
                 self.state["active_model"] = str(models[index])
+                if self.state.get("fallback_provider_id") == parts[2]:
+                    self.state["fallback_provider_id"] = None
+                    self.state["fallback_model"] = None
                 await self.show_home(chat_id)
             elif data == "scan:new":
                 self.state["pending"] = {"kind": "scan", "step": "target"}
