@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from agents.models.interface import Model
+import httpx
 from openai import APIConnectionError, APITimeoutError
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,17 @@ _PRIMARY_COOLDOWN_SECONDS = 60.0
 
 def is_transient_provider_error(exc: BaseException) -> bool:
     """Only capacity, timeout, network and transient server errors may fail over."""
-    if isinstance(exc, (APIConnectionError, APITimeoutError, TimeoutError, ConnectionError)):
+    if isinstance(
+        exc,
+        (
+            APIConnectionError,
+            APITimeoutError,
+            TimeoutError,
+            ConnectionError,
+            httpx.TimeoutException,
+            httpx.NetworkError,
+        ),
+    ):
         return True
 
     status = getattr(exc, "status_code", None)
