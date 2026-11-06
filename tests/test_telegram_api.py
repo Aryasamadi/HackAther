@@ -88,20 +88,19 @@ def test_plain_message_text_removes_formatting_and_decodes_entities() -> None:
         "<b>Header</b><br><blockquote expandable>Body &amp; details</blockquote>"
     ) == "Header\nBody & details"
 
-def test_telegram_error_redaction_covers_api_and_file_urls() -> None:
+@pytest.mark.asyncio
+async def test_telegram_error_redaction_covers_api_and_file_urls() -> None:
     api = TelegramAPI("token-must-never-leak")
+    raw = (
+        "request failed at https://api.telegram.org/bot"
+        "token-must-never-leak/sendMessage and "
+        "https://api.telegram.org/file/bot"
+        "token-must-never-leak/documents/file"
+    )
+    safe = api._redact_token_from_error(raw)
     try:
-        raw = (
-            "request failed at https://api.telegram.org/bot"
-            "token-must-never-leak/sendMessage and "
-            "https://api.telegram.org/file/bot"
-            "token-must-never-leak/documents/file"
-        )
-        safe = api._redact_token_from_error(raw)
         assert "token-must-never-leak" not in safe
         assert "bot<redacted>/sendMessage" in safe
         assert "file/bot<redacted>/documents/file" in safe
     finally:
-        import asyncio
-
-        asyncio.run(api.close())
+        await api.close()
