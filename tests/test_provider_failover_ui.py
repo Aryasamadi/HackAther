@@ -1,5 +1,4 @@
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from ares.telegram_bot import ARESBot
