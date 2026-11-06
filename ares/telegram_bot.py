@@ -275,6 +275,51 @@ class ARESBot:
                     "Periodic Strix checkpoint failed; previous checkpoint remains intact"
                 )
 
+    async def _stop_scan_safely(self, run_name: str) -> list[str]:
+        """Stop Strix even when persistence is temporarily unavailable."""
+        self._set_scan_control(run_name, "manual_stop", "stopping")
+
+        # Persist the no-auto-resume intent first when GitHub is reachable. A
+        # failed write must never prevent the actual cancellation from running.
+        try:
+            await self._save_state()
+        except Exception:
+            logger.exception(
+                "Could not persist manual STOP intent before cancelling Strix"
+            )
+
+        try:
+            await self.adapter.stop_scan()
+        except Exception:
+            self._set_scan_control(run_name, "recovery_required", "stop_failed")
+            try:
+                await self._save_state()
+            except Exception:
+                logger.exception("Could not persist failed manual STOP state")
+            raise
+
+        self._set_scan_control(run_name, "manual_stop", "stopped")
+        warnings: list[str] = []
+
+        try:
+            await asyncio.shield(self._checkpoint_snapshot())
+        except Exception:
+            logger.exception("Final durable checkpoint after manual STOP failed")
+            warnings.append(
+                "The final history checkpoint could not be uploaded; the previous "
+                "durable snapshot was preserved."
+            )
+
+        try:
+            await self._save_state()
+        except Exception:
+            logger.exception("Could not persist completed manual STOP state")
+            warnings.append(
+                "GitHub has not confirmed the final STOP state yet. ARES will retry "
+                "state persistence during its next polling cycle."
+            )
+        return warnings
+
     @staticmethod
     def _should_auto_resume(control: object) -> bool:
         return (
@@ -1680,17 +1725,20 @@ class ARESBot:
                 await self.render_menu(chat_id, notice, self._run_keyboard())
             elif data == "run:stop":
                 run_name = self.adapter.run_name or self.state.get("active_run")
-                if self.adapter.running and isinstance(run_name, str) and run_name:
-                    # Persist intent first: a restart must never auto-resume a user-stopped scan.
-                    self._set_scan_control(run_name, "manual_stop", "stopping")
-                    await self._save_state()
-                    await self.adapter.stop_scan()
-                    self._set_scan_control(run_name, "manual_stop", "stopped")
-                    await asyncio.shield(self._checkpoint_snapshot())
-                    await self._save_state()
+                if isinstance(run_name, str) and run_name:
+                    warnings = await self._stop_scan_safely(run_name)
+                    if warnings:
+                        await self.render_menu(
+                            chat_id,
+                            "🛑 <b>Strix stop command completed.</b>\n\n"
+                            + "\n".join(f"⚠️ {_h(item)}" for item in warnings),
+                            self.home_keyboard(),
+                        )
+                    else:
+                        await self.show_home(chat_id)
                 else:
                     await self.adapter.stop_scan()
-                await self.show_home(chat_id)
+                    await self.show_home(chat_id)
             elif data == "run:report":
                 report = self.adapter.report_markdown()
                 if not report.strip():
