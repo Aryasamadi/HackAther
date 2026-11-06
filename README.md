@@ -35,6 +35,15 @@ No JSON or LiteLLM provider identifier is requested. ARES discovers models from 
 
 Model pages show ten models at a time in two columns. You can refresh a provider's catalog without re-entering the token. The selected model is passed to Strix using its LiteLLM configuration.
 
+## Provider failover
+
+Open Models → Configure provider failover. Select a provider other than the active primary, then choose a discovered model from its catalog. The backup selection is saved inside encrypted ARES state and is applied to both new scans and Resume.
+
+Failover is disabled until a backup is explicitly selected. It is triggered only by temporary provider-capacity, network, timeout or server errors (HTTP 408, 425, 429, 500, 502, 503 or 504). Authentication, invalid-model, context-window and policy errors are not sent to the backup. The primary is placed on a 60-second cooldown after a transient failure; it is probed again after the cooldown. A streaming response can switch providers only before its first event, so partial text or tool calls are never replayed.
+
+When failover is enabled, ARES aligns the primary route with the backup's OpenAI-compatible Chat Completions interface and checks that both models use the same Strix strict/non-strict tool-schema mode. This does not prove the backup model supports every Strix tool or has sufficient context capacity: choose a backup model with tool/function calling and a context window suitable for the same scan.
+
+
 ## Scan controls
 
 - Targets: one target per line; multiple targets are supported.
