@@ -71,6 +71,17 @@ class TelegramAPI:
         self.base = f"https://api.telegram.org/bot{token}"
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(35, connect=15))
 
+    def _redact_token_from_error(self, message: str) -> str:
+        safe = message.replace(
+            self.base,
+            "https://api.telegram.org/bot<redacted>",
+        )
+        file_base = self.base.replace("/bot", "/file/bot", 1)
+        return safe.replace(
+            file_base,
+            "https://api.telegram.org/file/bot<redacted>",
+        )
+
     @staticmethod
     def _plain_message_text(value: str) -> str:
         """Remove Telegram HTML formatting while preserving readable message text."""
@@ -91,7 +102,16 @@ class TelegramAPI:
         *,
         allow_plain_fallback: bool = True,
     ) -> Any:
-        response = await self.client.post(f"{self.base}/{method}", json=payload or {})
+        try:
+            response = await self.client.post(
+                f"{self.base}/{method}",
+                json=payload or {},
+            )
+        except httpx.HTTPError as exc:
+            safe_error = self._redact_token_from_error(str(exc))
+            raise RuntimeError(
+                f"Telegram API {method} transport failure: {safe_error}"
+            ) from None
         try:
             result = response.json()
         except ValueError:
@@ -139,8 +159,14 @@ class TelegramAPI:
         if not isinstance(file_path, str) or not file_path:
             raise RuntimeError("Telegram did not return a valid document path")
         file_url = f"{self.base.replace('/bot', '/file/bot')}/{file_path}"
-        response = await self.client.get(file_url)
-        response.raise_for_status()
+        try:
+            response = await self.client.get(file_url)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            safe_error = self._redact_token_from_error(str(exc))
+            raise RuntimeError(
+                f"Telegram file download failed: {safe_error}"
+            ) from None
         if len(response.content) > 20 * 1024 * 1024:
             raise ValueError("This Telegram Bot API download is larger than 20 MiB")
         destination.parent.mkdir(parents=True, exist_ok=True)
