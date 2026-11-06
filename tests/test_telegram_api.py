@@ -104,3 +104,33 @@ async def test_telegram_error_redaction_covers_api_and_file_urls() -> None:
         assert "file/bot<redacted>/documents/file" in safe
     finally:
         await api.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_text", ["", "   ", "<b></b>", "<blockquote expandable></blockquote>"])
+async def test_telegram_replaces_empty_message_text_before_api_call(
+    empty_text: str,
+) -> None:
+    sent_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": {"message_id": 456}},
+        )
+
+    api = TelegramAPI("test-only-token")
+    await api.client.aclose()
+    api.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    try:
+        result = await api.call(
+            "sendMessage",
+            {"chat_id": 42, "text": empty_text, "parse_mode": "HTML"},
+        )
+
+        assert result == {"message_id": 456}
+        assert len(sent_payloads) == 1
+        assert sent_payloads[0]["text"] == "ARES: no message content was available."
+    finally:
+        await api.close()
