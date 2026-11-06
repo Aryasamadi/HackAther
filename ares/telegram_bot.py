@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,20 @@ class TelegramAPI:
         value = re.sub(r"\n{2,}", "\n", value)
         return value.strip() or " "
 
+    @classmethod
+    def _has_visible_message_text(cls, value: object) -> bool:
+        """Reject strings made only from whitespace or invisible Unicode controls."""
+        if not isinstance(value, str):
+            return False
+        plain = cls._plain_message_text(value)
+        return any(
+            not (
+                char.isspace()
+                or unicodedata.category(char)[0] in {"C", "Z", "M"}
+            )
+            for char in plain
+        )
+
     async def call(
         self,
         method: str,
@@ -107,15 +122,13 @@ class TelegramAPI:
         payload = dict(payload or {})
         if method in {"sendMessage", "editMessageText"}:
             message_text = payload.get("text")
-            has_visible_text = (
-                isinstance(message_text, str)
-                and bool(message_text.strip())
-                and bool(self._plain_message_text(message_text).strip())
-            )
-            if not has_visible_text:
+            if not self._has_visible_message_text(message_text):
+                raw_length = len(message_text) if isinstance(message_text, str) else 0
                 logger.warning(
-                    "Blocked empty Telegram %s payload; sending a safe placeholder",
+                    "Blocked empty/invisible Telegram %s payload (raw_chars=%d); "
+                    "sending a safe placeholder",
                     method,
+                    raw_length,
                 )
                 payload["text"] = "ARES: no message content was available."
         try:
