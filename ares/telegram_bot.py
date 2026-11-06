@@ -75,24 +75,24 @@ def _format_structured_value(value: Any, *, depth: int = 0) -> str:
         for key, item in entries[:30]:
             label = re.sub(r"[_-]+", " ", str(key)).strip().capitalize() or "Detail"
             rendered = _format_structured_value(item, depth=depth + 1)
-            if "\\n" in rendered:
-                indented = "\\n".join(f"  {line}" for line in rendered.splitlines())
-                lines.append(f"{label}:\\n{indented}")
+            if "\n" in rendered:
+                indented = "\n".join(f"  {line}" for line in rendered.splitlines())
+                lines.append(f"{label}:\n{indented}")
             else:
                 lines.append(f"{label}: {rendered}")
         if len(entries) > 30:
             lines.append(f"… {len(entries) - 30} more fields omitted")
-        return "\\n".join(lines)
+        return "\n".join(lines)
     if isinstance(value, list):
         if not value:
             return "No items"
         items = [
-            "• " + _format_structured_value(item, depth=depth + 1).replace("\\n", "\\n  ")
+            "• " + _format_structured_value(item, depth=depth + 1).replace("\n", "\n  ")
             for item in value[:20]
         ]
         if len(value) > 20:
             items.append(f"• … {len(value) - 20} more items omitted")
-        return "\\n".join(items)
+        return "\n".join(items)
     if value is None:
         return "—"
     if isinstance(value, bool):
