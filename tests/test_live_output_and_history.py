@@ -241,3 +241,59 @@ def test_live_message_uses_visible_placeholder_before_first_output() -> None:
     assert visible == "⏳ Waiting for Strix output…"
     assert "\u200b" not in visible
     assert ARESBot._has_visible_message_text(message) is True
+
+
+@pytest.mark.asyncio
+async def test_manual_stop_still_cancels_scan_when_first_state_save_fails() -> None:
+    bot = object.__new__(ARESBot)
+    bot.state = {}
+    bot.store = SimpleNamespace(
+        save=AsyncMock(side_effect=[OSError("GitHub temporarily unavailable"), None])
+    )
+    bot.adapter = SimpleNamespace(stop_scan=AsyncMock())
+    bot.snapshot_store = object()
+    bot._checkpoint_snapshot = AsyncMock(return_value=True)
+
+    warnings = await bot._stop_scan_safely("scan-123")
+
+    bot.adapter.stop_scan.assert_awaited_once()
+    assert bot.store.save.await_count == 2
+    assert bot.state["scan_control"]["intent"] == "manual_stop"
+    assert bot.state["scan_control"]["status"] == "stopped"
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_manual_stop_reports_when_final_state_cannot_be_persisted() -> None:
+    bot = object.__new__(ARESBot)
+    bot.state = {}
+    bot.store = SimpleNamespace(
+        save=AsyncMock(side_effect=OSError("GitHub unavailable"))
+    )
+    bot.adapter = SimpleNamespace(stop_scan=AsyncMock())
+    bot.snapshot_store = object()
+    bot._checkpoint_snapshot = AsyncMock(return_value=True)
+
+    warnings = await bot._stop_scan_safely("scan-456")
+
+    bot.adapter.stop_scan.assert_awaited_once()
+    assert bot.state["scan_control"]["intent"] == "manual_stop"
+    assert bot.state["scan_control"]["status"] == "stopped"
+    assert any("final STOP state" in warning for warning in warnings)
+
+
+@pytest.mark.asyncio
+async def test_failed_adapter_stop_is_not_reported_as_stopped() -> None:
+    bot = object.__new__(ARESBot)
+    bot.state = {}
+    bot.store = SimpleNamespace(save=AsyncMock())
+    bot.adapter = SimpleNamespace(
+        stop_scan=AsyncMock(side_effect=RuntimeError("adapter cancellation failed"))
+    )
+
+    with pytest.raises(RuntimeError, match="adapter cancellation failed"):
+        await bot._stop_scan_safely("scan-789")
+
+    assert bot.state["scan_control"]["intent"] == "recovery_required"
+    assert bot.state["scan_control"]["status"] == "stop_failed"
+    bot.store.save.assert_awaited_once()
