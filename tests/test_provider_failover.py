@@ -2,6 +2,7 @@ import pytest
 from agents.models.interface import Model
 
 from ares.agent_limits import (
+    PartialProviderStreamError,
     _FailoverModel,
     _FailoverPolicy,
     is_transient_provider_error,
@@ -106,7 +107,8 @@ async def test_stream_with_partial_output_is_not_replayed_on_fallback() -> None:
     stream = model.stream_response()
 
     assert await anext(stream) == "partial primary token"
-    with pytest.raises(_ProviderError):
+    with pytest.raises(PartialProviderStreamError):
         await anext(stream)
 
     assert fallback.stream_calls == 0
+    assert not is_transient_provider_error(PartialProviderStreamError("partial output"))
