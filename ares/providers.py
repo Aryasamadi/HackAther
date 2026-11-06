@@ -78,6 +78,9 @@ def remove_provider(state: dict[str, object], provider_id: str) -> bool:
     if state.get("active_provider_id") == provider_id:
         state["active_provider_id"] = None
         state["active_model"] = None
+    if state.get("fallback_provider_id") == provider_id:
+        state["fallback_provider_id"] = None
+        state["fallback_model"] = None
     return True
 
 

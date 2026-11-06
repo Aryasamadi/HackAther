@@ -4,10 +4,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
 
+from ares.agent_limits import bounded_llm_requests
 from strix.config import apply_config_override, load_settings
 from strix.core.agents import AgentCoordinator
 from strix.core.paths import run_dir_for
@@ -51,6 +53,16 @@ class StrixAdapter:
         self._scan_mode = "deep"
         self._scope_mode = "auto"
         self._diff_base: str | None = None
+        self._model_ref: str | None = None
+        self._fallback_provider: dict[str, Any] | None = None
+        self._fallback_model: str | None = None
+        raw_request_limit = os.environ.get("ARES_MAX_CONCURRENT_LLM_REQUESTS", "2").strip()
+        try:
+            self.max_concurrent_llm_requests = int(raw_request_limit)
+        except ValueError as exc:
+            raise RuntimeError("ARES_MAX_CONCURRENT_LLM_REQUESTS must be an integer from 1 to 8") from exc
+        if not 1 <= self.max_concurrent_llm_requests <= 8:
+            raise RuntimeError("ARES_MAX_CONCURRENT_LLM_REQUESTS must be between 1 and 8")
 
     @property
     def running(self) -> bool:
@@ -59,6 +71,7 @@ class StrixAdapter:
     def _configure_model(self, provider: dict[str, Any], model: str) -> None:
         provider_id = str(provider["litellm_id"])
         model_ref = model if model.startswith(provider_id + "/") else f"{provider_id}/{model}"
+        self._model_ref = model_ref
         self._config_path = Path(".ares-runtime") / "strix-cli-config.json"
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         config = {
@@ -74,6 +87,69 @@ class StrixAdapter:
         except OSError:
             pass
         apply_config_override(self._config_path)
+
+    def _configure_failover(
+        self,
+        primary_provider: dict[str, Any],
+        fallback_provider: dict[str, Any] | None,
+        fallback_model: str | None,
+    ) -> None:
+        if (fallback_provider is None) != (fallback_model is None):
+            raise ValueError("Fallback provider and model must be configured together")
+        self._fallback_provider = None
+        self._fallback_model = None
+        if fallback_provider is None or fallback_model is None:
+            return
+        if fallback_provider.get("id") == primary_provider.get("id"):
+            raise ValueError("Fallback provider must be different from the primary provider")
+        models = fallback_provider.get("models", [])
+        if not isinstance(models, list) or fallback_model not in models:
+            raise ValueError("Configured fallback model is no longer in the provider catalog")
+        for key in ("id", "litellm_id", "api_key", "base_url"):
+            if not str(fallback_provider.get(key, "")).strip():
+                raise ValueError(f"Fallback provider is missing required field: {key}")
+
+        from strix.config.models import supports_strict_tool_schemas
+
+        route_id = str(fallback_provider["litellm_id"])
+        fallback_ref = (
+            fallback_model
+            if fallback_model.startswith(route_id + "/")
+            else f"{route_id}/{fallback_model}"
+        )
+        if supports_strict_tool_schemas(self._model_ref or "") != supports_strict_tool_schemas(
+            fallback_ref
+        ):
+            raise ValueError(
+                "Primary and backup models must use compatible Strix tool-schema modes. "
+                "Choose two models that both support strict schemas, or two that both "
+                "require non-strict schemas."
+            )
+
+        # The credential-bound secondary StrixProvider uses Chat Completions.
+        # Force the primary route to the same API shape while failover is enabled.
+        if self._config_path is None:
+            raise RuntimeError("Primary model configuration was not initialized")
+        config = json.loads(self._config_path.read_text(encoding="utf-8"))
+        env = config.setdefault("env", {})
+        if not isinstance(env, dict):
+            raise ValueError("Primary Strix configuration has an invalid env block")
+        env["STRIX_API_TYPE"] = "chat_completions"
+        self._config_path.write_text(json.dumps(config), encoding="utf-8")
+        try:
+            self._config_path.chmod(0o600)
+        except OSError:
+            pass
+        apply_config_override(self._config_path)
+        effective_settings = load_settings()
+        if effective_settings.llm.api_type not in (None, "chat_completions"):
+            raise ValueError(
+                "The process environment forces a non-Chat-Completions STRIX_API_TYPE. "
+                "Remove that override before enabling this backup route."
+            )
+
+        self._fallback_provider = dict(fallback_provider)
+        self._fallback_model = fallback_model
 
     @staticmethod
     def _build_mcp_requests(
@@ -155,6 +231,8 @@ class StrixAdapter:
         instruction: str,
         provider: dict[str, Any],
         model: str,
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
         scan_mode: str = "deep",
         scope_mode: str = "auto",
         diff_base: str | None = None,
@@ -174,6 +252,7 @@ class StrixAdapter:
         if scope_mode not in {"auto", "diff", "full"}:
             raise ValueError("Unsupported Strix scope mode")
         self._configure_model(provider, model)
+        self._configure_failover(provider, fallback_provider, fallback_model)
         settings = load_settings()
         await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
         args = self._args(
@@ -204,6 +283,8 @@ class StrixAdapter:
         run_name: str,
         provider: dict[str, Any],
         model: str,
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
         max_budget_usd: float | None = None,
         max_turns: int = 500,
         mcp_servers: list[dict[str, Any]] | None = None,
@@ -213,6 +294,7 @@ class StrixAdapter:
         if self.running:
             raise RuntimeError("A Strix scan is already running")
         self._configure_model(provider, model)
+        self._configure_failover(provider, fallback_provider, fallback_model)
         settings = load_settings()
         await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
         args = self._args(
@@ -277,21 +359,34 @@ class StrixAdapter:
         self.report_state.vulnerability_updated_callback = lambda _item: self.controller.notify_changed()
         self.report_state.vulnerability_deleted_callback = lambda _item: self.controller.notify_changed()
         self.scan_error = None
+        async def _run_bounded_scan() -> None:
+            logger.info(
+                "Applying scan-wide LLM request limit: %d",
+                self.max_concurrent_llm_requests,
+            )
+            async with bounded_llm_requests(
+                self.max_concurrent_llm_requests,
+                primary_model_ref=self._model_ref,
+                fallback_provider=self._fallback_provider,
+                fallback_model=self._fallback_model,
+            ):
+                await run_strix_scan(
+                    scan_config=self.scan_config,
+                    scan_id=self.run_name,
+                    image=str(settings.runtime.image or "strix-sandbox:latest"),
+                    local_sources=args.local_sources or [],
+                    extra_files=read_workspace_files(args.workspace_files),
+                    coordinator=self.coordinator,
+                    interactive=True,
+                    max_turns=args.max_turns,
+                    max_budget_usd=args.max_budget_usd,
+                    event_sink=self._capture_event,
+                    mcp_connection_requests=self._mcp_requests,
+                    mcp_status_sink=self._capture_mcp_status,
+                )
+
         self.scan_task = asyncio.create_task(
-            run_strix_scan(
-                scan_config=self.scan_config,
-                scan_id=self.run_name,
-                image=str(settings.runtime.image or "strix-sandbox:latest"),
-                local_sources=args.local_sources or [],
-                extra_files=read_workspace_files(args.workspace_files),
-                coordinator=self.coordinator,
-                interactive=True,
-                max_turns=args.max_turns,
-                max_budget_usd=args.max_budget_usd,
-                event_sink=self._capture_event,
-                mcp_connection_requests=self._mcp_requests,
-                mcp_status_sink=self._capture_mcp_status,
-            ),
+            _run_bounded_scan(),
             name=f"strix:{self.run_name}",
         )
         self._sync_task = asyncio.create_task(self._sync_agents(), name="ares-agent-sync")

@@ -63,6 +63,43 @@ def _h(value: object) -> str:
     return html.escape(str(value), quote=False)
 
 
+def _format_structured_value(value: Any, *, depth: int = 0) -> str:
+    """Render nested finding evidence as readable Telegram text, not raw JSON."""
+    if depth >= 4:
+        return str(value)[:1200]
+    if isinstance(value, dict):
+        if not value:
+            return "No details"
+        lines: list[str] = []
+        entries = list(value.items())
+        for key, item in entries[:30]:
+            label = re.sub(r"[_-]+", " ", str(key)).strip().capitalize() or "Detail"
+            rendered = _format_structured_value(item, depth=depth + 1)
+            if "\n" in rendered:
+                indented = "\n".join(f"  {line}" for line in rendered.splitlines())
+                lines.append(f"{label}:\n{indented}")
+            else:
+                lines.append(f"{label}: {rendered}")
+        if len(entries) > 30:
+            lines.append(f"… {len(entries) - 30} more fields omitted")
+        return "\n".join(lines)
+    if isinstance(value, list):
+        if not value:
+            return "No items"
+        items = [
+            "• " + _format_structured_value(item, depth=depth + 1).replace("\n", "\n  ")
+            for item in value[:20]
+        ]
+        if len(value) > 20:
+            items.append(f"• … {len(value) - 20} more items omitted")
+        return "\n".join(items)
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return str(value)
+
+
 def _button(text: str, callback_data: str) -> dict[str, str]:
     return {"text": text, "callback_data": callback_data}
 
@@ -540,6 +577,25 @@ class ARESBot:
         provider = providers.get(provider_id) if isinstance(providers, dict) else None
         return provider if isinstance(provider, dict) else None
 
+    def _fallback_selection(self) -> tuple[dict[str, Any], str] | None:
+        providers = self.state.get("providers", {})
+        if not isinstance(providers, dict):
+            return None
+        provider_id = self.state.get("fallback_provider_id")
+        model = self.state.get("fallback_model")
+        if (
+            not isinstance(provider_id, str)
+            or provider_id == self.state.get("active_provider_id")
+            or not isinstance(model, str)
+            or not model
+        ):
+            return None
+        provider = providers.get(provider_id)
+        models = provider.get("models", []) if isinstance(provider, dict) else []
+        if not isinstance(provider, dict) or not isinstance(models, list) or model not in models:
+            return None
+        return provider, model
+
     async def _show_mcp_menu(self, chat_id: int) -> None:
         servers = self.state.get("mcp_servers", [])
         rows: list[list[dict[str, str]]] = []
@@ -603,12 +659,20 @@ class ARESBot:
                 count = len(item.get("models", [])) if isinstance(item.get("models"), list) else 0
                 active = " ✓" if provider_id == self.state.get("active_provider_id") else ""
                 rows.append([_button(f"{name}{active} · {count} models"[:60], f"provider:view:{provider_id}")])
+        fallback = self._fallback_selection()
+        fallback_label = (
+            f"Enabled · {fallback[0].get('name', 'Provider')} / {fallback[1]}"
+            if fallback
+            else "Not configured"
+        )
+        rows.append([_button("🛟 Configure provider failover", "failover:settings")])
         rows.append([_button("➕ Add model provider", "provider:add")])
         rows.append([_button("⬅️ Main menu", "menu:home")])
         await self.render_menu(
             chat_id,
             "<b>Models</b>\n"
             "Select a provider to browse its discovered models.\n"
+            f"<b>Backup route:</b> {_h(fallback_label)}\n"
             "Add a provider using its name, Base URL and token.",
             rows,
         )
@@ -666,6 +730,100 @@ class ARESBot:
             f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
             f"Active model: <code>{_h(active or 'none')}</code>\n\n"
             "Choose a model. The catalog refreshes automatically whenever you open this provider."
+        )
+        if notice:
+            menu_text = f"{_h(notice)}\n\n" + menu_text
+        await self.render_menu(chat_id, menu_text, rows)
+
+    async def _failover_menu(self, chat_id: int, *, notice: str | None = None) -> None:
+        providers = self.state.get("providers", {})
+        if not isinstance(providers, dict):
+            providers = {}
+        primary_id = self.state.get("active_provider_id")
+        fallback = self._fallback_selection()
+        rows: list[list[dict[str, str]]] = []
+        if fallback:
+            rows.append([_button("🛑 Disable failover", "failover:disable")])
+        for provider_id, provider in providers.items():
+            if not isinstance(provider, dict) or provider_id == primary_id:
+                continue
+            name = str(provider.get("name", provider_id))
+            count = len(provider.get("models", [])) if isinstance(provider.get("models"), list) else 0
+            selected = " ✓" if fallback and fallback[0].get("id") == provider.get("id") else ""
+            rows.append([
+                _button(
+                    f"Backup: {name}{selected} · {count} models"[:60],
+                    f"failover:provider:{provider_id}",
+                )
+            ])
+        if not any(row for row in rows if row[0]["callback_data"] != "failover:disable"):
+            rows.append([_button("➕ Add another provider", "provider:add")])
+        rows.append([_button("⬅️ Models", "models:list")])
+        fallback_text = (
+            f"<b>Selected backup:</b> {_h(fallback[0].get('name', 'Provider'))} "
+            f"/ <code>{_h(fallback[1])}</code>"
+            if fallback
+            else "<b>Selected backup:</b> Not configured"
+        )
+        menu_text = (
+            "<b>Provider failover</b>\n"
+            f"Primary: <code>{_h(self.state.get('active_model') or 'not selected')}</code>\n"
+            f"{fallback_text}\n\n"
+            "Choose a different saved provider, then choose a backup model with "
+            "tool/function calling and enough context for the same scan. "
+            "Only temporary provider errors trigger failover; authentication, "
+            "invalid-model, context and policy errors do not."
+        )
+        if notice:
+            menu_text = f"{_h(notice)}\n\n" + menu_text
+        await self.render_menu(chat_id, menu_text, rows)
+
+    async def _fallback_provider_models(
+        self,
+        chat_id: int,
+        provider_id: str,
+        page: int = 0,
+        *,
+        notice: str | None = None,
+    ) -> None:
+        providers = self.state.get("providers", {})
+        provider = providers.get(provider_id) if isinstance(providers, dict) else None
+        if not isinstance(provider, dict) or provider_id == self.state.get("active_provider_id"):
+            await self._failover_menu(chat_id, notice="Choose a provider different from the active primary.")
+            return
+        models = provider.get("models", [])
+        if not isinstance(models, list):
+            models = []
+        page_size = 10
+        page_count = max(1, (len(models) + page_size - 1) // page_size)
+        page = max(0, min(page, page_count - 1))
+        start = page * page_size
+        visible = models[start : start + page_size]
+        rows: list[list[dict[str, str]]] = []
+        for index in range(0, len(visible), 2):
+            row = []
+            for local_index, model in enumerate(visible[index : index + 2], start=index):
+                model_index = start + local_index
+                row.append(
+                    _button(
+                        model_button_label(provider, model),
+                        f"failover:model:{provider_id}:{model_index}",
+                    )
+                )
+            rows.append(row)
+        navigation: list[dict[str, str]] = []
+        if page > 0:
+            navigation.append(_button("⬅️ Previous", f"failover:page:{provider_id}:{page - 1}"))
+        if page + 1 < page_count:
+            navigation.append(_button("Next ➡️", f"failover:page:{provider_id}:{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+        rows.append([_button("⬅️ Backup providers", "failover:settings")])
+        model_range = f"{start + 1}–{start + len(visible)} of {len(models)}" if models else "No models discovered"
+        menu_text = (
+            f"<b>Backup model · {_h(provider.get('name', provider_id))}</b>\n"
+            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
+            "Choose the model to use only when the primary provider is temporarily unavailable."
         )
         if notice:
             menu_text = f"{_h(notice)}\n\n" + menu_text
@@ -948,6 +1106,7 @@ class ARESBot:
             await self.render_menu(chat_id, "A Strix scan is already running or initializing.", self._run_keyboard())
             return
 
+        fallback = self._fallback_selection()
         settings = self.state.get("settings", {})
         if not isinstance(settings, dict):
             settings = {}
@@ -974,6 +1133,8 @@ class ARESBot:
                 provider,
                 model,
                 dict(settings),
+                fallback[0] if fallback else None,
+                fallback[1] if fallback else None,
             ),
             name="ares-scan-start",
         )
@@ -988,6 +1149,8 @@ class ARESBot:
         provider: dict[str, Any],
         model: str,
         settings: dict[str, Any],
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         try:
             run_name = await self.adapter.start(
@@ -995,6 +1158,8 @@ class ARESBot:
                 instruction=instruction,
                 provider=provider,
                 model=model,
+                fallback_provider=fallback_provider,
+                fallback_model=fallback_model,
                 scan_mode=str(settings.get("scan_mode", "deep")),
                 scope_mode=str(settings.get("scope_mode", "auto")),
                 diff_base=settings.get("diff_base"),
@@ -1052,6 +1217,7 @@ class ARESBot:
             await self.render_menu(chat_id, "A Strix scan is already running or initializing.", self._run_keyboard())
             return
 
+        fallback = self._fallback_selection()
         settings = self.state.get("settings", {})
         if not isinstance(settings, dict):
             settings = {}
@@ -1070,7 +1236,9 @@ class ARESBot:
             return
         self.startup_task = asyncio.create_task(
             self._resume_scan_background(
-                chat_id, message_id, run_name, provider, model, dict(settings)
+                chat_id, message_id, run_name, provider, model, dict(settings),
+                fallback[0] if fallback else None,
+                fallback[1] if fallback else None,
             ),
             name="ares-scan-resume",
         )
@@ -1083,12 +1251,16 @@ class ARESBot:
         provider: dict[str, Any],
         model: str,
         settings: dict[str, Any],
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         try:
             name = await self.adapter.resume(
                 run_name=run_name,
                 provider=provider,
                 model=model,
+                fallback_provider=fallback_provider,
+                fallback_model=fallback_model,
                 max_budget_usd=settings.get("max_budget_usd"),
                 max_turns=int(settings.get("max_turns", 500)),
                 mcp_servers=self.state.get("mcp_servers", []),
@@ -1344,11 +1516,11 @@ class ARESBot:
             target = str(item.get("target") or "not specified")
             endpoint = str(item.get("endpoint") or "not specified")
             lines.append(
-                f"{index + 1}. [{severity}] {title}\\n"
-                f"Target: {target}\\nEndpoint: {endpoint}"
+                f"{index + 1}. [{severity}] {title}\n"
+                f"Target: {target}\nEndpoint: {endpoint}"
             )
             rows.append([_button(f"{severity} · {title}"[:60], f"finding:view:{index}")])
-        await self.send_long(chat_id, "\\n\\n".join(lines), rows or None)
+        await self.send_long(chat_id, "\n\n".join(lines), rows or None)
         return True
 
     async def _show_events(self, chat_id: int) -> None:
@@ -1407,7 +1579,7 @@ class ARESBot:
             value = finding.get(key)
             if value:
                 if isinstance(value, (dict, list)):
-                    value = json.dumps(value, ensure_ascii=False, indent=2)
+                    value = _format_structured_value(value)
                 chunks.append(f"{label}\n{str(value)}")
         await self.send_long(chat_id, "\n\n".join(chunks))
 
@@ -1596,6 +1768,41 @@ class ARESBot:
                 await self._consume_pending(chat_id, "-")
             elif data == "models:list":
                 await self._models_menu(chat_id)
+            elif data == "failover:settings":
+                await self._failover_menu(chat_id)
+            elif data == "failover:disable":
+                self.state["fallback_provider_id"] = None
+                self.state["fallback_model"] = None
+                await self._failover_menu(chat_id, notice="Provider failover disabled.")
+            elif action == "failover" and len(parts) == 3 and parts[1] == "provider":
+                provider_id = parts[2]
+                if provider_id == self.state.get("active_provider_id"):
+                    raise ValueError("Backup provider must be different from the active primary.")
+                try:
+                    await self._refresh_provider_catalog(provider_id)
+                except Exception as exc:
+                    logger.warning("Backup provider refresh failed for %s: %s", provider_id, type(exc).__name__)
+                    await self._fallback_provider_models(
+                        chat_id, provider_id, 0,
+                        notice="Could not refresh the catalog; showing saved models.",
+                    )
+                else:
+                    await self._fallback_provider_models(chat_id, provider_id, 0)
+            elif action == "failover" and len(parts) == 4 and parts[1] == "page":
+                await self._fallback_provider_models(chat_id, parts[2], int(parts[3]))
+            elif action == "failover" and len(parts) == 4 and parts[1] == "model":
+                provider_id = parts[2]
+                if provider_id == self.state.get("active_provider_id"):
+                    raise ValueError("Backup provider must be different from the active primary.")
+                providers = self.state.get("providers", {})
+                provider = providers.get(provider_id) if isinstance(providers, dict) else None
+                models = provider.get("models", []) if isinstance(provider, dict) else []
+                index = int(parts[3])
+                if not isinstance(models, list) or not 0 <= index < len(models):
+                    raise ValueError("Backup model selection is no longer valid")
+                self.state["fallback_provider_id"] = provider_id
+                self.state["fallback_model"] = str(models[index])
+                await self._failover_menu(chat_id, notice="Backup model saved.")
             elif data == "provider:add":
                 await self._begin_provider(chat_id)
             elif data == "provider:cancel":
@@ -1665,6 +1872,9 @@ class ARESBot:
                     raise ValueError("Model selection is no longer valid")
                 self.state["active_provider_id"] = parts[2]
                 self.state["active_model"] = str(models[index])
+                if self.state.get("fallback_provider_id") == parts[2]:
+                    self.state["fallback_provider_id"] = None
+                    self.state["fallback_model"] = None
                 await self.show_home(chat_id)
             elif data == "scan:new":
                 self.state["pending"] = {"kind": "scan", "step": "target"}
