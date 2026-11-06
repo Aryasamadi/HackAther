@@ -10,6 +10,7 @@ import ares.strix_adapter as adapter_module
 from ares.strix_adapter import StrixAdapter
 from ares.telegram_bot import (
     ARESBot,
+    TelegramAPI,
     MAX_TELEGRAM_TEXT,
     _split_utf16,
     _utf16_units,
@@ -240,7 +241,7 @@ def test_live_message_uses_visible_placeholder_before_first_output() -> None:
     visible = html.unescape(quote.group(1))
     assert visible == "⏳ Waiting for Strix output…"
     assert "\u200b" not in visible
-    assert ARESBot._has_visible_message_text(message) is True
+    assert TelegramAPI._has_visible_message_text(message) is True
 
 
 @pytest.mark.asyncio
