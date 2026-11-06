@@ -670,9 +670,9 @@ class ARESBot:
         rows.append([_button("⬅️ Main menu", "menu:home")])
         await self.render_menu(
             chat_id,
-            "<b>Models</b>\\n"
-            "Select a provider to browse its discovered models.\\n"
-            f"<b>Backup route:</b> {_h(fallback_label)}\\n"
+            "<b>Models</b>\n"
+            "Select a provider to browse its discovered models.\n"
+            f"<b>Backup route:</b> {_h(fallback_label)}\n"
             "Add a provider using its name, Base URL and token.",
             rows,
         )
@@ -766,14 +766,14 @@ class ARESBot:
             else "<b>Selected backup:</b> Not configured"
         )
         menu_text = (
-            "<b>Provider failover</b>\\n"
-            f"Primary: <code>{_h(self.state.get('active_model') or 'not selected')}</code>\\n"
-            f"{fallback_text}\\n\\n"
+            "<b>Provider failover</b>\n"
+            f"Primary: <code>{_h(self.state.get('active_model') or 'not selected')}</code>\n"
+            f"{fallback_text}\n\n"
             "Choose a different saved provider, then choose its backup model. "
             "ARES switches only on temporary capacity, network or server errors."
         )
         if notice:
-            menu_text = f"{_h(notice)}\\n\\n" + menu_text
+            menu_text = f"{_h(notice)}\n\n" + menu_text
         await self.render_menu(chat_id, menu_text, rows)
 
     async def _fallback_provider_models(
@@ -819,12 +819,12 @@ class ARESBot:
         rows.append([_button("⬅️ Backup providers", "failover:settings")])
         model_range = f"{start + 1}–{start + len(visible)} of {len(models)}" if models else "No models discovered"
         menu_text = (
-            f"<b>Backup model · {_h(provider.get('name', provider_id))}</b>\\n"
-            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\\n"
+            f"<b>Backup model · {_h(provider.get('name', provider_id))}</b>\n"
+            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
             "Choose the model to use only when the primary provider is temporarily unavailable."
         )
         if notice:
-            menu_text = f"{_h(notice)}\\n\\n" + menu_text
+            menu_text = f"{_h(notice)}\n\n" + menu_text
         await self.render_menu(chat_id, menu_text, rows)
 
     async def _begin_provider(self, chat_id: int) -> None:
@@ -1514,11 +1514,11 @@ class ARESBot:
             target = str(item.get("target") or "not specified")
             endpoint = str(item.get("endpoint") or "not specified")
             lines.append(
-                f"{index + 1}. [{severity}] {title}\\n"
-                f"Target: {target}\\nEndpoint: {endpoint}"
+                f"{index + 1}. [{severity}] {title}\n"
+                f"Target: {target}\nEndpoint: {endpoint}"
             )
             rows.append([_button(f"{severity} · {title}"[:60], f"finding:view:{index}")])
-        await self.send_long(chat_id, "\\n\\n".join(lines), rows or None)
+        await self.send_long(chat_id, "\n\n".join(lines), rows or None)
         return True
 
     async def _show_events(self, chat_id: int) -> None:
