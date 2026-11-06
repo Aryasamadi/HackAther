@@ -4,10 +4,12 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
 
+from ares.agent_limits import bounded_llm_requests
 from strix.config import apply_config_override, load_settings
 from strix.core.agents import AgentCoordinator
 from strix.core.paths import run_dir_for
@@ -51,6 +53,13 @@ class StrixAdapter:
         self._scan_mode = "deep"
         self._scope_mode = "auto"
         self._diff_base: str | None = None
+        raw_request_limit = os.environ.get("ARES_MAX_CONCURRENT_LLM_REQUESTS", "2").strip()
+        try:
+            self.max_concurrent_llm_requests = int(raw_request_limit)
+        except ValueError as exc:
+            raise RuntimeError("ARES_MAX_CONCURRENT_LLM_REQUESTS must be an integer from 1 to 8") from exc
+        if not 1 <= self.max_concurrent_llm_requests <= 8:
+            raise RuntimeError("ARES_MAX_CONCURRENT_LLM_REQUESTS must be between 1 and 8")
 
     @property
     def running(self) -> bool:
@@ -277,21 +286,29 @@ class StrixAdapter:
         self.report_state.vulnerability_updated_callback = lambda _item: self.controller.notify_changed()
         self.report_state.vulnerability_deleted_callback = lambda _item: self.controller.notify_changed()
         self.scan_error = None
+        async def _run_bounded_scan() -> None:
+            logger.info(
+                "Applying scan-wide LLM request limit: %d",
+                self.max_concurrent_llm_requests,
+            )
+            async with bounded_llm_requests(self.max_concurrent_llm_requests):
+                await run_strix_scan(
+                    scan_config=self.scan_config,
+                    scan_id=self.run_name,
+                    image=str(settings.runtime.image or "strix-sandbox:latest"),
+                    local_sources=args.local_sources or [],
+                    extra_files=read_workspace_files(args.workspace_files),
+                    coordinator=self.coordinator,
+                    interactive=True,
+                    max_turns=args.max_turns,
+                    max_budget_usd=args.max_budget_usd,
+                    event_sink=self._capture_event,
+                    mcp_connection_requests=self._mcp_requests,
+                    mcp_status_sink=self._capture_mcp_status,
+                )
+
         self.scan_task = asyncio.create_task(
-            run_strix_scan(
-                scan_config=self.scan_config,
-                scan_id=self.run_name,
-                image=str(settings.runtime.image or "strix-sandbox:latest"),
-                local_sources=args.local_sources or [],
-                extra_files=read_workspace_files(args.workspace_files),
-                coordinator=self.coordinator,
-                interactive=True,
-                max_turns=args.max_turns,
-                max_budget_usd=args.max_budget_usd,
-                event_sink=self._capture_event,
-                mcp_connection_requests=self._mcp_requests,
-                mcp_status_sink=self._capture_mcp_status,
-            ),
+            _run_bounded_scan(),
             name=f"strix:{self.run_name}",
         )
         self._sync_task = asyncio.create_task(self._sync_agents(), name="ares-agent-sync")
