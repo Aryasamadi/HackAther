@@ -1104,6 +1104,7 @@ class ARESBot:
             await self.render_menu(chat_id, "A Strix scan is already running or initializing.", self._run_keyboard())
             return
 
+        fallback = self._fallback_selection()
         settings = self.state.get("settings", {})
         if not isinstance(settings, dict):
             settings = {}
@@ -1130,6 +1131,8 @@ class ARESBot:
                 provider,
                 model,
                 dict(settings),
+                fallback[0] if fallback else None,
+                fallback[1] if fallback else None,
             ),
             name="ares-scan-start",
         )
@@ -1144,6 +1147,8 @@ class ARESBot:
         provider: dict[str, Any],
         model: str,
         settings: dict[str, Any],
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         try:
             run_name = await self.adapter.start(
@@ -1151,6 +1156,8 @@ class ARESBot:
                 instruction=instruction,
                 provider=provider,
                 model=model,
+                fallback_provider=fallback_provider,
+                fallback_model=fallback_model,
                 scan_mode=str(settings.get("scan_mode", "deep")),
                 scope_mode=str(settings.get("scope_mode", "auto")),
                 diff_base=settings.get("diff_base"),
@@ -1208,6 +1215,7 @@ class ARESBot:
             await self.render_menu(chat_id, "A Strix scan is already running or initializing.", self._run_keyboard())
             return
 
+        fallback = self._fallback_selection()
         settings = self.state.get("settings", {})
         if not isinstance(settings, dict):
             settings = {}
@@ -1226,7 +1234,9 @@ class ARESBot:
             return
         self.startup_task = asyncio.create_task(
             self._resume_scan_background(
-                chat_id, message_id, run_name, provider, model, dict(settings)
+                chat_id, message_id, run_name, provider, model, dict(settings),
+                fallback[0] if fallback else None,
+                fallback[1] if fallback else None,
             ),
             name="ares-scan-resume",
         )
@@ -1239,12 +1249,16 @@ class ARESBot:
         provider: dict[str, Any],
         model: str,
         settings: dict[str, Any],
+        fallback_provider: dict[str, Any] | None = None,
+        fallback_model: str | None = None,
     ) -> None:
         try:
             name = await self.adapter.resume(
                 run_name=run_name,
                 provider=provider,
                 model=model,
+                fallback_provider=fallback_provider,
+                fallback_model=fallback_model,
                 max_budget_usd=settings.get("max_budget_usd"),
                 max_turns=int(settings.get("max_turns", 500)),
                 mcp_servers=self.state.get("mcp_servers", []),
