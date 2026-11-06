@@ -94,7 +94,7 @@ class TelegramAPI:
         )
         value = re.sub(r"<[^>]*>", "", value)
         value = html.unescape(value)
-        value = re.sub(r"\\n{2,}", "\\n", value)
+        value = re.sub(r"\n{2,}", "\n", value)
         return value.strip() or " "
 
     async def call(
