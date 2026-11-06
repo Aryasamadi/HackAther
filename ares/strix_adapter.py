@@ -141,6 +141,12 @@ class StrixAdapter:
         except OSError:
             pass
         apply_config_override(self._config_path)
+        effective_settings = load_settings()
+        if effective_settings.llm.api_type not in (None, "chat_completions"):
+            raise ValueError(
+                "The process environment forces a non-Chat-Completions STRIX_API_TYPE. "
+                "Remove that override before enabling this backup route."
+            )
 
         self._fallback_provider = dict(fallback_provider)
         self._fallback_model = fallback_model
