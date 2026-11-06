@@ -71,12 +71,66 @@ class TelegramAPI:
         self.base = f"https://api.telegram.org/bot{token}"
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(35, connect=15))
 
-    async def call(self, method: str, payload: dict[str, Any] | None = None) -> Any:
+    @staticmethod
+    def _plain_message_text(value: str) -> str:
+        """Remove Telegram HTML formatting while preserving readable message text."""
+        value = re.sub(r"<br\\s*/?>", "\\n", value, flags=re.IGNORECASE)
+        value = re.sub(
+            r"</(?:blockquote|pre|p|div|b|strong|i|em|u|ins|s|strike|del|code)>",
+            "\\n",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(r"<[^>]*>", "", value)
+        return html.unescape(value).strip() or " "
+
+    async def call(
+        self,
+        method: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        allow_plain_fallback: bool = True,
+    ) -> Any:
         response = await self.client.post(f"{self.base}/{method}", json=payload or {})
-        response.raise_for_status()
-        result = response.json()
-        if not result.get("ok"):
-            raise RuntimeError(f"Telegram API {method} failed: {result.get('description', 'unknown error')}")
+        try:
+            result = response.json()
+        except ValueError:
+            result = {}
+
+        if not response.is_success or not isinstance(result, dict) or not result.get("ok"):
+            description = (
+                result.get("description")
+                if isinstance(result, dict)
+                else None
+            )
+            if not isinstance(description, str) or not description:
+                description = f"HTTP {response.status_code} with a non-JSON response"
+
+            # Telegram rejects malformed/unsupported HTML with HTTP 400. Retry once
+            # as plain text so a formatting issue cannot break scan controls.
+            is_message_method = method in {"sendMessage", "editMessageText"}
+            has_html_mode = isinstance(payload, dict) and payload.get("parse_mode") == "HTML"
+            is_entity_error = "can't parse entities" in description.casefold()
+            if allow_plain_fallback and is_message_method and has_html_mode and is_entity_error:
+                fallback_payload = dict(payload or {})
+                fallback_text = fallback_payload.get("text")
+                if isinstance(fallback_text, str):
+                    fallback_payload["text"] = self._plain_message_text(fallback_text)
+                    fallback_payload.pop("parse_mode", None)
+                    logger.warning(
+                        "Telegram rejected HTML entities for %s; retrying once as plain text",
+                        method,
+                    )
+                    return await self.call(
+                        method,
+                        fallback_payload,
+                        allow_plain_fallback=False,
+                    )
+
+            # Never include the request URL here: it contains the bot token.
+            raise RuntimeError(
+                f"Telegram API {method} failed (HTTP {response.status_code}): {description}"
+            )
         return result.get("result")
 
     async def download_document(self, file_id: str, destination: Path) -> Path:
