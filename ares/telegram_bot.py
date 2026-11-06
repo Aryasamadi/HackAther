@@ -74,10 +74,10 @@ class TelegramAPI:
     @staticmethod
     def _plain_message_text(value: str) -> str:
         """Remove Telegram HTML formatting while preserving readable message text."""
-        value = re.sub(r"<br\\s*/?>", "\\n", value, flags=re.IGNORECASE)
+        value = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
         value = re.sub(
             r"</(?:blockquote|pre|p|div|b|strong|i|em|u|ins|s|strike|del|code)>",
-            "\\n",
+            "\n",
             value,
             flags=re.IGNORECASE,
         )
