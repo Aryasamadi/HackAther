@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -53,6 +54,8 @@ class StateStore:
         self.branch = branch
         self.local_path = Path(local_path)
         self.remote_sha: str | None = None
+        # Serialize all writes from Telegram callbacks, polling, monitors and shutdown.
+        self._save_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(timeout=25)
         self._api_base = "https://api.github.com"
 
@@ -167,31 +170,51 @@ class StateStore:
         return state
 
     async def save(self, state: dict[str, Any]) -> None:
-        encrypted = self._encrypt(state)
-        self.local_path.parent.mkdir(parents=True, exist_ok=True)
-        self.local_path.write_bytes(encrypted)
-        try:
-            self.local_path.chmod(0o600)
-        except OSError:
-            pass
-        if not (self.github_token and self.repository):
-            return
-        encoded = base64.b64encode(encrypted).decode("ascii")
-        body: dict[str, Any] = {
-            "message": "chore(ares): update encrypted bot state",
-            "content": encoded,
-            "branch": self.branch,
-        }
-        if self.remote_sha:
-            body["sha"] = self.remote_sha
-        response = await self._client.put(self._contents_url(), headers=self._headers(), json=body)
-        if response.status_code == 409:
-            await self._refresh_remote_sha()
+        async with self._save_lock:
+            encrypted = self._encrypt(state)
+            self.local_path.parent.mkdir(parents=True, exist_ok=True)
+            self.local_path.write_bytes(encrypted)
+            try:
+                self.local_path.chmod(0o600)
+            except OSError:
+                pass
+            if not (self.github_token and self.repository):
+                return
+
+            encoded = base64.b64encode(encrypted).decode("ascii")
+            body: dict[str, Any] = {
+                "message": "chore(ares): update encrypted bot state",
+                "content": encoded,
+                "branch": self.branch,
+            }
             if self.remote_sha:
                 body["sha"] = self.remote_sha
-            response = await self._client.put(self._contents_url(), headers=self._headers(), json=body)
-        response.raise_for_status()
-        self.remote_sha = response.json().get("content", {}).get("sha", self.remote_sha)
+
+            # A single StateStore is shared by polling, callbacks and monitor tasks.
+            # Serialize those writes, then refresh the blob SHA and retry boundedly
+            # if another worker still wins a GitHub Contents API race.
+            for attempt in range(4):
+                response = await self._client.put(
+                    self._contents_url(),
+                    headers=self._headers(),
+                    json=body,
+                )
+                if response.status_code != 409:
+                    response.raise_for_status()
+                    self.remote_sha = response.json().get(
+                        "content", {}
+                    ).get("sha", self.remote_sha)
+                    return
+
+                if attempt == 3:
+                    response.raise_for_status()
+
+                await asyncio.sleep(0.2 * (2**attempt))
+                await self._refresh_remote_sha()
+                if self.remote_sha:
+                    body["sha"] = self.remote_sha
+                else:
+                    body.pop("sha", None)
 
     async def _refresh_remote_sha(self) -> None:
         response = await self._client.get(
