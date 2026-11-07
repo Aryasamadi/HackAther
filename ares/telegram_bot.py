@@ -1790,15 +1790,31 @@ class ARESBot:
              [_button("⬅️ Agents", "run:agents")]],
         )
 
-    async def _show_findings(self, chat_id: int) -> bool:
-        findings = self.adapter.snapshot().get("findings", [])
-        if not isinstance(findings, list) or not findings:
+    async def _show_findings(
+        self,
+        chat_id: int,
+        run_name: str | None = None,
+    ) -> bool:
+        selected_run = run_name or self.adapter.run_name or self.state.get("active_run")
+        if not isinstance(selected_run, str) or not selected_run:
             return False
-        lines = ["Strix findings", f"Total: {len(findings)}"]
+        findings = self.adapter.findings_for_run(selected_run)
+        if not findings:
+            return False
+
+        self.state["ui_findings_run_name"] = selected_run
+        self.state["ui_finding_ids"] = []
+        is_active_run = self.adapter.running and selected_run == self.adapter.run_name
+        lines = [f"Strix findings · {selected_run}", f"Total: {len(findings)}"]
         rows: list[list[dict[str, str]]] = []
-        for index, item in enumerate(findings[:40]):
+        for item in findings[:40]:
             if not isinstance(item, dict):
                 continue
+            finding_id = item.get("id")
+            if not isinstance(finding_id, str) or not finding_id:
+                continue
+            index = len(self.state["ui_finding_ids"])
+            self.state["ui_finding_ids"].append(finding_id)
             title = str(item.get("title", "Untitled finding"))
             severity = str(item.get("severity", "unknown")).upper()
             target = str(item.get("target") or "not specified")
@@ -1808,6 +1824,13 @@ class ARESBot:
                 f"Target: {target}\nEndpoint: {endpoint}"
             )
             rows.append([_button(f"{severity} · {title}"[:60], f"finding:view:{index}")])
+
+        if not is_active_run:
+            rows.append([_button("🗑 Delete all findings", "finding:delete_all")])
+        if selected_run != (self.adapter.run_name or self.state.get("active_run")):
+            rows.append([_button("⬅️ Back to this run", f"history:view:{selected_run}")])
+        else:
+            rows.append([_button("⬅️ Run controls", "run:dashboard")])
         await self.send_long(chat_id, "\n\n".join(lines), rows or None)
         return True
 
@@ -1851,11 +1874,22 @@ class ARESBot:
         await self.send_long(chat_id, "\n\n".join(lines))
 
     async def _show_finding(self, chat_id: int, index: int) -> None:
-        findings = self.adapter.snapshot().get("findings", [])
-        if not isinstance(findings, list) or not 0 <= index < len(findings):
+        run_name = self.state.get("ui_findings_run_name")
+        finding_ids = self.state.get("ui_finding_ids", [])
+        if (
+            not isinstance(run_name, str)
+            or not isinstance(finding_ids, list)
+            or not 0 <= index < len(finding_ids)
+        ):
+            await self.send_long(chat_id, "Finding selection expired. Open the findings list again.")
+            return
+        finding_id = finding_ids[index]
+        findings = self.adapter.findings_for_run(run_name)
+        finding = next((item for item in findings if item.get("id") == finding_id), None)
+        if not isinstance(finding, dict):
             await self.send_long(chat_id, "Finding not found.")
             return
-        finding = findings[index]
+
         fields = [
             ("Severity", "severity"), ("Confidence", "confidence"), ("Target", "target"),
             ("Endpoint", "endpoint"), ("Description", "description"), ("Impact", "impact"),
@@ -1869,7 +1903,23 @@ class ARESBot:
                 if isinstance(value, (dict, list)):
                     value = _format_structured_value(value)
                 chunks.append(f"{label}\n{str(value)}")
-        await self.send_long(chat_id, "\n\n".join(chunks))
+
+        keyboard: list[list[dict[str, str]]] = []
+        is_active_run = self.adapter.running and run_name == self.adapter.run_name
+        if not is_active_run:
+            keyboard.append([_button("🗑 Delete finding", f"finding:delete:{index}")])
+        current_run = self.adapter.run_name or self.state.get("active_run")
+        back_callback = (
+            "run:findings"
+            if run_name == current_run
+            else (
+                f"history:findings:{run_name}"
+                if len(f"history:findings:{run_name}") <= 64
+                else "runs:list"
+            )
+        )
+        keyboard.append([_button("⬅️ Back to findings", back_callback)])
+        await self.send_long(chat_id, "\n\n".join(chunks), keyboard)
 
     async def _open_viewer(self, chat_id: int) -> None:
         try:
@@ -1893,12 +1943,20 @@ class ARESBot:
 
     async def _show_history(self, chat_id: int) -> None:
         rows = []
-        for item in self.adapter.history()[:15]:
+        history = self.adapter.history()
+        for item in history[:15]:
             name = str(item["run_name"])
             label = f"{item['status']} · {item['findings']} findings · {item['target']}"
             rows.append([_button(label[:60], f"history:view:{name}")])
+        if history:
+            rows.append([_button("🗑 Delete all saved history", "history:delete_all")])
         rows.append([_button("⬅️ Main menu", "menu:home")])
-        await self.render_menu(chat_id, "<b>Strix scan history</b>\nSelect a run to inspect, resume or delete.", rows)
+        await self.render_menu(
+            chat_id,
+            f"<b>Strix scan history</b>\nSaved runs: <b>{len(history)}</b>\n"
+            "Select a run to inspect, resume or delete.",
+            rows,
+        )
 
     async def _show_run_history_item(self, chat_id: int, run_name: str) -> None:
         item = next((x for x in self.adapter.history() if x["run_name"] == run_name), None)
@@ -1908,6 +1966,8 @@ class ARESBot:
         buttons = []
         if item.get("resumable"):
             buttons.append(_button("▶️ Resume", f"history:resume:{run_name}"))
+        if item.get("findings") and len(f"history:findings:{run_name}") <= 64:
+            buttons.append(_button("🔎 Findings", f"history:findings:{run_name}"))
         buttons.append(_button("📄 Open report", f"history:report:{run_name}"))
         buttons.append(_button("🗑 Delete this run", f"history:delete:{run_name}"))
         await self.render_menu(
@@ -2322,6 +2382,120 @@ class ARESBot:
                 await self._show_agent_events(chat_id, parts[2])
             elif action == "finding" and len(parts) == 3 and parts[1] == "view":
                 await self._show_finding(chat_id, int(parts[2]))
+            elif action == "finding" and len(parts) == 3 and parts[1] == "delete":
+                run_name = self.state.get("ui_findings_run_name")
+                finding_ids = self.state.get("ui_finding_ids", [])
+                index = int(parts[2])
+                if (
+                    not isinstance(run_name, str)
+                    or not isinstance(finding_ids, list)
+                    or not 0 <= index < len(finding_ids)
+                ):
+                    raise ValueError("Finding selection expired. Open the findings list again.")
+                finding_id = finding_ids[index]
+                finding = next(
+                    (
+                        item for item in self.adapter.findings_for_run(run_name)
+                        if item.get("id") == finding_id
+                    ),
+                    None,
+                )
+                if not isinstance(finding, dict):
+                    raise ValueError("Finding not found")
+                self.state["pending_finding_delete"] = {
+                    "run_name": run_name,
+                    "finding_id": finding_id,
+                    "title": str(finding.get("title") or finding_id),
+                }
+                await self.render_menu(
+                    chat_id,
+                    "⚠️ <b>Delete this finding?</b>\n"
+                    f"Finding: <b>{_h(finding.get('title') or finding_id)}</b>\n"
+                    f"Run: <code>{_h(run_name)}</code>\n\n"
+                    "Strix will remove it from the findings index and regenerate the "
+                    "report artifacts. Its withdrawal reason remains in the run audit record.",
+                    [[_button("🗑 Confirm delete", "finding:delete:confirm")],
+                     [_button("Cancel", "finding:delete:cancel")]],
+                )
+            elif data == "finding:delete:confirm":
+                pending = self.state.pop("pending_finding_delete", None)
+                if not isinstance(pending, dict):
+                    raise ValueError("No finding deletion is awaiting confirmation")
+                run_name = str(pending.get("run_name") or "")
+                deleted = self.adapter.delete_finding_item(
+                    run_name,
+                    str(pending.get("finding_id") or ""),
+                )
+                current_run = self.adapter.run_name or self.state.get("active_run")
+                back_callback = (
+                    "run:findings"
+                    if run_name == current_run
+                    else (
+                        f"history:findings:{run_name}"
+                        if len(f"history:findings:{run_name}") <= 64
+                        else "runs:list"
+                    )
+                )
+                await self.render_menu(
+                    chat_id,
+                    f"✅ Deleted finding: <b>{_h(deleted.get('title') or deleted.get('id'))}</b>",
+                    [[_button("🔎 Back to findings", back_callback)]],
+                )
+            elif data == "finding:delete:cancel":
+                self.state.pop("pending_finding_delete", None)
+                run_name = self.state.get("ui_findings_run_name")
+                if isinstance(run_name, str):
+                    await self._show_findings(chat_id, run_name)
+                else:
+                    await self.show_home(chat_id)
+            elif data == "finding:delete_all":
+                run_name = self.state.get("ui_findings_run_name")
+                if not isinstance(run_name, str):
+                    raise ValueError("Open a findings list first")
+                findings = self.adapter.findings_for_run(run_name)
+                if not findings:
+                    raise ValueError("There are no findings to delete")
+                self.state["pending_finding_delete_all"] = run_name
+                await self.render_menu(
+                    chat_id,
+                    "⚠️ <b>Delete all findings for this run?</b>\n"
+                    f"Run: <code>{_h(run_name)}</code>\n"
+                    f"Findings to delete: <b>{len(findings)}</b>\n\n"
+                    "Every finding will be withdrawn from Strix's index and its report "
+                    "artifacts regenerated. The scan history itself will remain.",
+                    [[_button("🗑 Confirm delete all", "finding:delete_all:confirm")],
+                     [_button("Cancel", "finding:delete_all:cancel")]],
+                )
+            elif data == "finding:delete_all:confirm":
+                run_name = self.state.pop("pending_finding_delete_all", None)
+                if not isinstance(run_name, str):
+                    raise ValueError("No bulk finding deletion is awaiting confirmation")
+                result = self.adapter.delete_all_findings(run_name)
+                current_run = self.adapter.run_name or self.state.get("active_run")
+                back_callback = (
+                    "run:findings"
+                    if run_name == current_run
+                    else (
+                        f"history:findings:{run_name}"
+                        if len(f"history:findings:{run_name}") <= 64
+                        else "runs:list"
+                    )
+                )
+                await self.render_menu(
+                    chat_id,
+                    "✅ <b>Finding cleanup finished</b>\n"
+                    f"Deleted findings: <b>{result['deleted']}</b>\n"
+                    f"Failed deletions: <b>{result['failed']}</b>",
+                    [[_button("🔎 Back to findings", back_callback)],
+                     [_button("📚 Scan history", "runs:list")]],
+                )
+            elif data == "finding:delete_all:cancel":
+                self.state.pop("pending_finding_delete_all", None)
+                run_name = self.state.get("ui_findings_run_name")
+                if isinstance(run_name, str):
+                    await self._show_findings(chat_id, run_name)
+                else:
+                    await self.show_home(chat_id)
             elif data in {"run:toggle_budget", "run:pause", "run:resume_budget"}:
                 paused = bool(self.adapter.snapshot().get("budget_paused", False))
                 if data == "run:resume_budget" or (data == "run:toggle_budget" and paused):
@@ -2333,19 +2507,52 @@ class ARESBot:
                 await self.render_menu(chat_id, notice, self._run_keyboard())
             elif data == "run:stop":
                 run_name = self.adapter.run_name or self.state.get("active_run")
-                if isinstance(run_name, str) and run_name:
-                    warnings = await self._stop_scan_safely(run_name)
-                    if warnings:
-                        await self.render_menu(
-                            chat_id,
-                            "🛑 <b>Strix stop command completed.</b>\n\n"
-                            + "\n".join(f"⚠️ {_h(item)}" for item in warnings),
-                            self.home_keyboard(),
-                        )
-                    else:
-                        await self.show_home(chat_id)
+                if not self.adapter.running or not isinstance(run_name, str) or not run_name:
+                    await self.answer_callback(
+                        query_id,
+                        "There is no active scan to stop.",
+                        show_alert=True,
+                    )
+                    callback_answered = True
                 else:
-                    await self.adapter.stop_scan()
+                    self.state["pending_stop_run_name"] = run_name
+                    await self.render_menu(
+                        chat_id,
+                        "⚠️ <b>Confirm STOP</b>\n"
+                        f"Run: <code>{_h(run_name)}</code>\n\n"
+                        "This will cancel the active Strix scan. It will remain stopped "
+                        "and will not be auto-resumed by the next Runner.",
+                        [[_button("🛑 Confirm STOP", "run:stop:confirm")],
+                         [_button("Cancel", "run:stop:cancel")]],
+                    )
+            elif data == "run:stop:confirm":
+                run_name = self.state.pop("pending_stop_run_name", None)
+                current_run = self.adapter.run_name or self.state.get("active_run")
+                if (
+                    not isinstance(run_name, str)
+                    or not self.adapter.running
+                    or current_run != run_name
+                ):
+                    raise ValueError("STOP confirmation expired; the active run has changed")
+                warnings = await self._stop_scan_safely(run_name)
+                if warnings:
+                    await self.render_menu(
+                        chat_id,
+                        "🛑 <b>Strix stop command completed.</b>\n\n"
+                        + "\n".join(f"⚠️ {_h(item)}" for item in warnings),
+                        self.home_keyboard(),
+                    )
+                else:
+                    await self.show_home(chat_id)
+            elif data == "run:stop:cancel":
+                self.state.pop("pending_stop_run_name", None)
+                if self.adapter.running:
+                    await self.render_menu(
+                        chat_id,
+                        "STOP cancelled. The Strix scan is still running.",
+                        self._run_keyboard(),
+                    )
+                else:
                     await self.show_home(chat_id)
             elif data == "run:report":
                 report = self.adapter.report_markdown()
@@ -2358,6 +2565,14 @@ class ARESBot:
                     await self.send_long(chat_id, report)
             elif data == "runs:list":
                 await self._show_history(chat_id)
+            elif action == "history" and len(parts) == 3 and parts[1] == "findings":
+                if not await self._show_findings(chat_id, parts[2]):
+                    await self.answer_callback(
+                        query_id,
+                        "No findings have been recorded for this run.",
+                        show_alert=True,
+                    )
+                    callback_answered = True
             elif action == "history" and len(parts) == 3 and parts[1] == "view":
                 await self._show_run_history_item(chat_id, parts[2])
             elif action == "history" and len(parts) == 3 and parts[1] == "delete":
@@ -2387,6 +2602,37 @@ class ARESBot:
                     f"✅ Deleted scan history: <code>{_h(run_name)}</code>",
                     [[_button("📚 Back to history", "runs:list")]],
                 )
+            elif data == "history:delete_all":
+                history = self.adapter.history()
+                if not history:
+                    raise ValueError("There is no saved scan history to delete")
+                active_name = self.adapter.run_name if self.adapter.running else None
+                deletable = sum(1 for item in history if item["run_name"] != active_name)
+                self.state["pending_history_delete_all"] = True
+                await self.render_menu(
+                    chat_id,
+                    "⚠️ <b>Delete all saved scan history?</b>\n"
+                    f"Runs to delete: <b>{deletable}</b>\n"
+                    f"Active run preserved: <b>{'yes' if active_name else 'no'}</b>\n\n"
+                    "This removes the saved run folders and their reports. "
+                    "Encrypted ARES settings and the active scan are not deleted.",
+                    [[_button("🗑 Confirm delete all", "history:delete_all:confirm")],
+                     [_button("Cancel", "history:delete_all:cancel")]],
+                )
+            elif data == "history:delete_all:confirm":
+                if not self.state.pop("pending_history_delete_all", False):
+                    raise ValueError("No bulk history deletion is awaiting confirmation")
+                result = self.adapter.delete_all_history_items()
+                await self.render_menu(
+                    chat_id,
+                    "✅ <b>History cleanup finished</b>\n"
+                    f"Deleted runs: <b>{result['deleted']}</b>\n"
+                    f"Active runs preserved: <b>{result['skipped_active']}</b>",
+                    [[_button("📚 Back to history", "runs:list")]],
+                )
+            elif data == "history:delete_all:cancel":
+                self.state.pop("pending_history_delete_all", None)
+                await self._show_history(chat_id)
             elif data == "history:delete:cancel":
                 self.state.pop("pending_history_delete", None)
                 await self._show_history(chat_id)

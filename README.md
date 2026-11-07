@@ -64,7 +64,7 @@ Recovery continues from the latest durable checkpoint, not from another process'
 - Scope: Auto, Diff or Full, with an optional diff base.
 - Budget and max turns: configured in Settings and passed to Strix's runner.
 - LLM request pressure: `ARES_MAX_CONCURRENT_LLM_REQUESTS` caps in-flight model requests across the scan (default `2`, allowed `1`–`8`). This bounds actual provider calls without blocking Strix's parent/child Agent orchestration.
-- Live controls: inspect agents, inspect events and per-agent transcript, steer or stop an agent, pause/resume budget, stop the run, inspect findings, and view the report.
+- Live controls: inspect agents, events and per-agent transcript; steer or stop an agent; pause/resume budget; inspect findings; and view reports. Scan history supports per-run and bulk deletion with confirmation. Findings from saved runs support per-finding and bulk withdrawal through Strix, with deletion audit metadata retained. The active scan and its findings are protected from deletion.
 
 ## MCP connections
 
@@ -91,17 +91,22 @@ See docs/FEATURE_PARITY.md for the current capability-by-capability status and k
 
 GitHub-hosted runners are temporary. ARES therefore treats each workflow run as a replaceable worker, not as permanent storage. Telegram update offsets and Provider/MCP records are encrypted and committed to `.ares/state.enc`. Strix run directories are archived with authenticated encryption and checkpointed as a rotating asset in the fixed GitHub pre-release `ares-state-snapshot`. The new asset is uploaded successfully before older snapshot assets are removed, so checkpoints do not create an ever-growing Git commit history.
 
-While a scan is active, ARES writes a durable checkpoint every two minutes, immediately after a scan starts or resumes, after a manual stop, and during graceful worker shutdown. The latest complete checkpoint remains in repository storage independently of the Actions run that produced it. The workflow artifact `ares-strix-state` is retained as a secondary, 30-day compatibility fallback; it is no longer the primary source of truth.
+While a scan is active, ARES writes a durable checkpoint every 60 seconds by default (configurable from 30 to 300 seconds), immediately after a scan starts or resumes, after a manual stop, and during graceful worker shutdown. The latest complete checkpoint remains in repository storage independently of the Actions run that produced it. The workflow artifact `ares-strix-state` is retained as a secondary, 30-day compatibility fallback; it is no longer the primary source of truth.
 
-The encrypted lifecycle record distinguishes four intents:
+The encrypted lifecycle record distinguishes five intents:
 - `running`: a scan was active; after an unexpected worker loss, ARES may attempt automatic recovery.
 - `handoff`: the worker is shutting down normally; the next worker may attempt automatic recovery.
 - `manual_stop`: the operator explicitly stopped the scan in Telegram; the next worker must not restart it automatically. The saved run remains in Scan history and can be resumed manually when Strix marks it resumable.
 - `completed`: the scan finished; the next worker starts normally without resuming it.
+- `recovery_required`: the saved run is missing, failed, non-resumable or could not be resumed; ARES leaves it for operator inspection and does not enter an automatic retry loop.
 
 On startup, ARES first validates and restores the durable repository snapshot, then falls back to a legacy Actions artifact when needed. If earlier runtime runs exist but neither source can be restored, startup is refused rather than silently opening an empty history. Automatic Resume is attempted only for a recorded `running` or `handoff` run that Strix itself marks resumable; failed recovery is recorded as `recovery_required` to avoid an endless restart loop.
 
 The workflow uses non-cancelling concurrency so a new worker cannot automatically kill the current worker before its shutdown hooks can run. Scheduled handoffs remain subject to GitHub scheduling delays and dropped scheduled events; repository checkpoints protect the latest saved state, but cannot preserve activity that has not yet reached a checkpoint.
+
+## History, findings and STOP safety
+
+Deleting one history run or all saved runs requires an explicit confirmation. Bulk history cleanup skips the active run and does not delete encrypted provider/MCP settings or `.ares/state.enc`. Saved-run findings can be withdrawn individually or in bulk; ARES calls Strix 1.7.0's native `ReportState.delete_vulnerability_report` so the findings index and report artifacts are regenerated and the withdrawal reason is retained in the run record. Finding deletion is disabled while its scan is active to avoid racing Strix's report writer. The STOP control also requires a second confirmation; confirming it persists `manual_stop`, which is terminal and distinct from an automatic Runner handoff.
 ## Security notes
 
 - Provider and MCP records are encrypted with AES-GCM. The encryption key is derived from the Telegram bot token, repository identity and admin ID; rotating the bot token without migrating the encrypted state makes old state unreadable.
