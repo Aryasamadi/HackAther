@@ -107,17 +107,19 @@ def test_agent_detail_displays_escaped_failure_reason() -> None:
 
 def test_findings_are_sent_as_standalone_message_with_detail_buttons() -> None:
     bot = object.__new__(ARESBot)
+    bot.state = {}
     bot.adapter = SimpleNamespace(
-        snapshot=lambda: {
-            "findings": [
-                {
-                    "title": "Example issue",
-                    "severity": "high",
-                    "target": "example.test",
-                    "endpoint": "/login",
-                }
-            ]
-        }
+        run_name="run-123",
+        running=False,
+        findings_for_run=lambda _run: [
+            {
+                "id": "vuln-0001",
+                "title": "Example issue",
+                "severity": "high",
+                "target": "example.test",
+                "endpoint": "/login",
+            }
+        ],
     )
     bot.send_long = AsyncMock()
 
@@ -134,7 +136,12 @@ def test_findings_are_sent_as_standalone_message_with_detail_buttons() -> None:
 
 def test_findings_empty_returns_false_for_callback_alert() -> None:
     bot = object.__new__(ARESBot)
-    bot.adapter = SimpleNamespace(snapshot=lambda: {"findings": []})
+    bot.state = {}
+    bot.adapter = SimpleNamespace(
+        run_name="run-123",
+        running=False,
+        findings_for_run=lambda _run: [],
+    )
 
     assert asyncio.run(bot._show_findings(42)) is False
 
