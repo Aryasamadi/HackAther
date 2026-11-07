@@ -74,7 +74,7 @@ def test_findings_for_saved_run_reads_strix_index(tmp_path, monkeypatch) -> None
 
 
 def test_delete_finding_uses_native_strix_report_state(tmp_path, monkeypatch) -> None:
-    root = _saved_runs(tmp_path, ["saved-run"], monkeypatch)
+    _saved_runs(tmp_path, ["saved-run"], monkeypatch)
     calls: list[tuple[str, str]] = []
 
     class FakeReportState:
