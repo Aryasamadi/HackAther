@@ -72,7 +72,7 @@ def test_provider_models_menu_marks_selected_model_and_has_no_router_controls() 
     callbacks = [button["callback_data"] for row in keyboard for button in row]
     labels = [button["text"] for row in keyboard for button in row]
     assert "Selected:" in text
-    assert any(label == "model-b ✓" for label in labels)
+    assert any(label == "vendor/model-b ✓" for label in labels)
     assert not any(callback.startswith(("router:", "failover:")) for callback in callbacks)
     assert not any(callback.startswith("provider:refresh:") for callback in callbacks)
     assert "provider:delete:provider-1" in callbacks

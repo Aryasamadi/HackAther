@@ -885,7 +885,7 @@ class ARESBot:
         rows.append([_button("⬅️ Main menu", "menu:home")])
         await self.render_menu(
             chat_id,
-            "<b>Models</b>\\n"
+            "<b>Models</b>\n"
             "Open any provider and choose one model. The first selected model becomes the default; "
             "each additional selected provider joins background AI routing automatically.",
             rows,
@@ -948,13 +948,13 @@ class ARESBot:
             else "No model selected yet."
         )
         menu_text = (
-            f"<b>{_h(provider.get('name', provider_id))}</b>\\n"
-            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\\n"
-            f"{selected_text}\\n\\n"
+            f"<b>{_h(provider.get('name', provider_id))}</b>\n"
+            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
+            f"{selected_text}\n\n"
             "Choose one model. Every provider with a selected model is used automatically by background AI routing."
         )
         if notice:
-            menu_text = f"{_h(notice)}\\n\\n" + menu_text
+            menu_text = f"{_h(notice)}\n\n" + menu_text
         await self.render_menu(chat_id, menu_text, rows)
 
     async def _begin_provider(self, chat_id: int) -> None:
