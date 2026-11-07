@@ -134,7 +134,7 @@ def test_findings_list_uses_stable_ids_and_only_offers_delete_for_saved_run() ->
     bot = object.__new__(ARESBot)
     bot.state = {}
     bot.adapter = SimpleNamespace(
-        run_name="saved-run",
+        run_name="newer-run",
         running=False,
         findings_for_run=lambda _run: [
             {"id": "vuln-0007", "title": "Stored issue", "severity": "high"}
