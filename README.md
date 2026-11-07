@@ -35,14 +35,17 @@ No JSON or LiteLLM provider identifier is requested. ARES discovers models from 
 
 Model pages show ten models at a time in two columns. You can refresh a provider's catalog without re-entering the token. The selected model is passed to Strix using its LiteLLM configuration.
 
-## Provider failover
+## Shared AI provider router
 
-Open Models → Configure provider failover. Select a provider other than the active primary, then choose a discovered model from its catalog. The backup selection is saved inside encrypted ARES state and is applied to both new scans and Resume.
+ARES supports a shared provider pool rather than a single primary/backup pair. Choose one primary model in Models, then open **Configure shared AI Router** to add one compatible model route per additional provider. Adding or removing providers and changing route settings is done through Telegram; no code change is required.
 
-Failover is disabled until a backup is explicitly selected. It is triggered only by temporary provider-capacity, network, timeout or server errors (HTTP 408, 425, 429, 500, 502, 503 or 504). Authentication, invalid-model, context-window and policy errors are not sent to the backup. The primary is placed on a 60-second cooldown after a transient failure; it is probed again after the cooldown. A streaming response can switch providers only before its first event, so partial text or tool calls are never replayed.
+Each Strix agent request uses the same scan-wide router. The default scheduler is weighted least-in-flight: it prefers a healthy provider with fewer active requests relative to its weight. Each route has a configurable weight (1–10) and per-provider parallel-request cap (1–8); the existing scan-wide `ARES_MAX_CONCURRENT_LLM_REQUESTS` limit remains the global upper bound (default 2, allowed 1–8).
 
-When failover is enabled, ARES aligns the primary route with the backup's OpenAI-compatible Chat Completions interface and checks that both models use the same Strix strict/non-strict tool-schema mode. This does not prove the backup model supports every Strix tool or has sufficient context capacity: choose a backup model with tool/function calling and a context window suitable for the same scan.
+Temporary capacity, network, timeout and server errors trigger an attempt on another healthy route. A failing provider enters an exponential cooldown (60 seconds up to 5 minutes); it is automatically reconsidered after cooldown and returns to normal service after a successful probe. Authentication, invalid-model, context and policy errors are not retried through other providers. Streams can switch routes only before their first event, so partial text or tool calls are never replayed.
 
+All pool routes use the OpenAI-compatible Chat Completions interface and must match the primary model's Strix strict/non-strict tool-schema mode. ARES can check the schema mode and the configured API shape, but OpenAI-compatible model catalogs do not reliably expose context-window size or full tool/function-calling quality. Select models that support Strix tool calls and have enough context for the same scan; compatibility of every tool and context limit cannot be guaranteed from `/models` alone. A provider must expose `GET /models` or `GET /v1/models`.
+
+The former encrypted single-backup settings remain readable and are treated as an additional shared-pool route at scan startup until replaced in Router settings. Existing provider credentials remain encrypted in ARES state.
 
 ## Scan controls
 
