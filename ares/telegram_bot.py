@@ -1908,7 +1908,17 @@ class ARESBot:
         is_active_run = self.adapter.running and run_name == self.adapter.run_name
         if not is_active_run:
             keyboard.append([_button("🗑 Delete finding", f"finding:delete:{index}")])
-        keyboard.append([_button("⬅️ Back to findings", "run:findings")])
+        current_run = self.adapter.run_name or self.state.get("active_run")
+        back_callback = (
+            "run:findings"
+            if run_name == current_run
+            else (
+                f"history:findings:{run_name}"
+                if len(f"history:findings:{run_name}") <= 64
+                else "runs:list"
+            )
+        )
+        keyboard.append([_button("⬅️ Back to findings", back_callback)])
         await self.send_long(chat_id, "\n\n".join(chunks), keyboard)
 
     async def _open_viewer(self, chat_id: int) -> None:
@@ -2411,14 +2421,25 @@ class ARESBot:
                 pending = self.state.pop("pending_finding_delete", None)
                 if not isinstance(pending, dict):
                     raise ValueError("No finding deletion is awaiting confirmation")
+                run_name = str(pending.get("run_name") or "")
                 deleted = self.adapter.delete_finding_item(
-                    str(pending.get("run_name") or ""),
+                    run_name,
                     str(pending.get("finding_id") or ""),
+                )
+                current_run = self.adapter.run_name or self.state.get("active_run")
+                back_callback = (
+                    "run:findings"
+                    if run_name == current_run
+                    else (
+                        f"history:findings:{run_name}"
+                        if len(f"history:findings:{run_name}") <= 64
+                        else "runs:list"
+                    )
                 )
                 await self.render_menu(
                     chat_id,
                     f"✅ Deleted finding: <b>{_h(deleted.get('title') or deleted.get('id'))}</b>",
-                    [[_button("🔎 Back to findings", "run:findings")]],
+                    [[_button("🔎 Back to findings", back_callback)]],
                 )
             elif data == "finding:delete:cancel":
                 self.state.pop("pending_finding_delete", None)
@@ -2450,12 +2471,22 @@ class ARESBot:
                 if not isinstance(run_name, str):
                     raise ValueError("No bulk finding deletion is awaiting confirmation")
                 result = self.adapter.delete_all_findings(run_name)
+                current_run = self.adapter.run_name or self.state.get("active_run")
+                back_callback = (
+                    "run:findings"
+                    if run_name == current_run
+                    else (
+                        f"history:findings:{run_name}"
+                        if len(f"history:findings:{run_name}") <= 64
+                        else "runs:list"
+                    )
+                )
                 await self.render_menu(
                     chat_id,
                     "✅ <b>Finding cleanup finished</b>\n"
                     f"Deleted findings: <b>{result['deleted']}</b>\n"
                     f"Failed deletions: <b>{result['failed']}</b>",
-                    [[_button("🔎 Back to findings", "run:findings")],
+                    [[_button("🔎 Back to findings", back_callback)],
                      [_button("📚 Scan history", "runs:list")]],
                 )
             elif data == "finding:delete_all:cancel":
