@@ -216,7 +216,7 @@ async def test_close_never_relabels_manual_stop_as_handoff() -> None:
 
     assert bot.state["scan_control"]["intent"] == "manual_stop"
     bot._checkpoint_snapshot.assert_awaited_once()
-    bot._save_state.assert_awaited_once()
+    assert bot._save_state.await_count == 2
 
 
 def test_runtime_workflow_queues_new_workers_and_has_a_safe_shutdown_window() -> None:
