@@ -732,151 +732,6 @@ class ARESBot:
                 )
         return routes
 
-    async def _router_menu(self, chat_id: int, *, notice: str | None = None) -> None:
-        primary = self._active_provider()
-        primary_name = str(primary.get("name", "Provider")) if primary else "Not configured"
-        primary_model = str(self.state.get("active_model") or "not selected")
-        routes = self._routing_pool_payload()
-        rows: list[list[dict[str, str]]] = []
-        for route in routes:
-            provider = route["provider"]
-            provider_id = str(provider.get("id") or "")
-            model = str(route["model"])
-            rows.append(
-                [_button(
-                    f"🗑 Remove: {provider.get('name', provider_id)} · {model}"[:58],
-                    f"router:remove:{provider_id}",
-                )]
-            )
-            weight = int(route["weight"])
-            concurrency = int(route["max_concurrency"])
-            rows.append(
-                [
-                    _button(f"Weight − ({weight})", f"router:weight:{provider_id}:{max(1, weight - 1)}"),
-                    _button(f"Weight + ({weight})", f"router:weight:{provider_id}:{min(10, weight + 1)}"),
-                ]
-            )
-            rows.append(
-                [
-                    _button(f"Parallel − ({concurrency})", f"router:concurrency:{provider_id}:{max(1, concurrency - 1)}"),
-                    _button(f"Parallel + ({concurrency})", f"router:concurrency:{provider_id}:{min(8, concurrency + 1)}"),
-                ]
-            )
-        rows.append([_button("➕ Add provider route", "router:add")])
-        rows.append([_button("⬅️ Models", "models:list")])
-        menu_text = (
-            "<b>Shared AI Router</b>\n"
-            f"Primary: <b>{_h(primary_name)}</b> / <code>{_h(primary_model)}</code>\n"
-            f"Additional routes: <b>{len(routes)}</b> · Total routes: <b>{len(routes) + (1 if primary else 0)}</b>\n\n"
-            "Requests are distributed by weighted least-in-flight. A provider that returns "
-            "temporary capacity, network or server errors enters a cooldown; healthy routes "
-            "continue serving requests. Recovered routes are automatically admitted again.\n"
-            "Each provider uses one selected model, a weight of 1–10 and a per-provider "
-            "parallel-request cap of 1–8."
-        )
-        if notice:
-            menu_text = f"{_h(notice)}\n\n" + menu_text
-        await self.render_menu(chat_id, menu_text, rows)
-
-    async def _router_add_menu(self, chat_id: int, page: int = 0) -> None:
-        providers = self.state.get("providers", {})
-        if not isinstance(providers, dict):
-            providers = {}
-        selected_ids = {
-            str(route["provider"].get("id"))
-            for route in self._routing_pool_payload()
-            if isinstance(route.get("provider"), dict)
-        }
-        primary_id = self.state.get("active_provider_id")
-        available = [
-            (provider_id, provider)
-            for provider_id, provider in providers.items()
-            if isinstance(provider, dict)
-            and provider_id != primary_id
-            and provider_id not in selected_ids
-        ]
-        page_size = 8
-        page_count = max(1, (len(available) + page_size - 1) // page_size)
-        page = max(0, min(page, page_count - 1))
-        visible = available[page * page_size : (page + 1) * page_size]
-        rows = [
-            [_button(
-                f"{provider.get('name', provider_id)} · "
-                f"{len(provider.get('models', [])) if isinstance(provider.get('models'), list) else 0} models"[:58],
-                f"router:provider:{provider_id}",
-            )]
-            for provider_id, provider in visible
-        ]
-        navigation: list[dict[str, str]] = []
-        if page > 0:
-            navigation.append(_button("⬅️ Previous", f"router:addpage:{page - 1}"))
-        if page + 1 < page_count:
-            navigation.append(_button("Next ➡️", f"router:addpage:{page + 1}"))
-        if navigation:
-            rows.append(navigation)
-        if not available:
-            rows.append([_button("➕ Add model provider", "provider:add")])
-        rows.append([_button("⬅️ Router", "router:settings")])
-        await self.render_menu(
-            chat_id,
-            "<b>Add a route to the shared AI pool</b>\n"
-            "Choose a saved provider. You will then choose the exact model used for "
-            "all Strix agents routed through that provider. The primary provider is "
-            "already included automatically.\n"
-            f"Providers {page + 1}/{page_count}",
-            rows,
-        )
-
-    async def _router_provider_models(
-        self, chat_id: int, provider_id: str, page: int = 0, *, notice: str | None = None
-    ) -> None:
-        providers = self.state.get("providers", {})
-        provider = providers.get(provider_id) if isinstance(providers, dict) else None
-        if not isinstance(provider, dict) or provider_id == self.state.get("active_provider_id"):
-            await self._router_add_menu(chat_id)
-            return
-        models = provider.get("models", [])
-        if not isinstance(models, list):
-            models = []
-        page_size = 10
-        page_count = max(1, (len(models) + page_size - 1) // page_size)
-        page = max(0, min(page, page_count - 1))
-        start = page * page_size
-        visible = models[start : start + page_size]
-        rows: list[list[dict[str, str]]] = []
-        for index in range(0, len(visible), 2):
-            row = []
-            for local_index, model in enumerate(visible[index : index + 2], start=index):
-                model_index = start + local_index
-                row.append(
-                    _button(
-                        model_button_label(provider, model),
-                        f"router:model:{provider_id}:{model_index}",
-                    )
-                )
-            rows.append(row)
-        navigation: list[dict[str, str]] = []
-        if page > 0:
-            navigation.append(_button("⬅️ Previous", f"router:page:{provider_id}:{page - 1}"))
-        if page + 1 < page_count:
-            navigation.append(_button("Next ➡️", f"router:page:{provider_id}:{page + 1}"))
-        if navigation:
-            rows.append(navigation)
-        rows.append([_button("⬅️ Provider list", "router:add")])
-        model_range = (
-            f"{start + 1}–{start + len(visible)} of {len(models)}"
-            if models else "No models discovered"
-        )
-        menu_text = (
-            f"<b>Choose route model · {_h(provider.get('name', provider_id))}</b>\n"
-            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
-            "Select a model with tool/function calling and enough context for the scan. "
-            "Its compatibility will be checked against the primary Strix tool-schema mode."
-        )
-        if notice:
-            menu_text = f"{_h(notice)}\n\n" + menu_text
-        await self.render_menu(chat_id, menu_text, rows)
-
     async def _show_mcp_menu(self, chat_id: int) -> None:
         servers = self.state.get("mcp_servers", [])
         rows: list[list[dict[str, str]]] = []
@@ -931,25 +786,108 @@ class ARESBot:
              [_button("⬅️ MCP list", "mcp:list")]],
         )
 
+    def _selected_provider_model(self, provider_id: str) -> str | None:
+        providers = self.state.get("providers", {})
+        provider = providers.get(provider_id) if isinstance(providers, dict) else None
+        models = provider.get("models", []) if isinstance(provider, dict) else []
+        if not isinstance(provider, dict) or not isinstance(models, list):
+            return None
+
+        active_model = self.state.get("active_model")
+        if self.state.get("active_provider_id") == provider_id:
+            return active_model if isinstance(active_model, str) and active_model in models else None
+
+        for route in self._routing_pool_payload():
+            route_provider = route.get("provider")
+            route_model = route.get("model")
+            if (
+                isinstance(route_provider, dict)
+                and route_provider.get("id") == provider_id
+                and isinstance(route_model, str)
+                and route_model in models
+            ):
+                return route_model
+        return None
+
+    def _remember_provider_model(self, provider_id: str, model: str) -> str:
+        providers = self.state.get("providers", {})
+        provider = providers.get(provider_id) if isinstance(providers, dict) else None
+        models = provider.get("models", []) if isinstance(provider, dict) else []
+        if not isinstance(provider, dict) or not isinstance(models, list) or model not in models:
+            raise ValueError("Provider or model selection is no longer valid")
+
+        pool = self.state.get("routing_pool", [])
+        if not isinstance(pool, list):
+            pool = []
+        pool = [
+            item for item in pool
+            if not isinstance(item, dict) or item.get("provider_id") != provider_id
+        ]
+
+        active_provider = self._active_provider()
+        active_model = self.state.get("active_model")
+        active_models = active_provider.get("models", []) if isinstance(active_provider, dict) else []
+        has_primary = (
+            isinstance(active_provider, dict)
+            and isinstance(active_model, str)
+            and isinstance(active_models, list)
+            and active_model in active_models
+        )
+
+        if not has_primary or self.state.get("active_provider_id") == provider_id:
+            self.state["active_provider_id"] = provider_id
+            self.state["active_model"] = model
+            self.state["routing_pool"] = pool
+            if self.state.get("fallback_provider_id") == provider_id:
+                self.state["fallback_provider_id"] = None
+                self.state["fallback_model"] = None
+            return "Default model selected."
+
+        existing_route = next(
+            (
+                route for route in self._routing_pool_payload()
+                if isinstance(route.get("provider"), dict)
+                and route["provider"].get("id") == provider_id
+            ),
+            None,
+        )
+        weight = int(existing_route.get("weight", 1)) if existing_route else 1
+        concurrency = int(existing_route.get("max_concurrency", 2)) if existing_route else 2
+        pool.append(
+            {
+                "provider_id": provider_id,
+                "model": model,
+                "weight": weight,
+                "max_concurrency": concurrency,
+            }
+        )
+        self.state["routing_pool"] = pool
+        if self.state.get("fallback_provider_id") == provider_id:
+            self.state["fallback_provider_id"] = None
+            self.state["fallback_model"] = None
+        return f"{_h(provider.get('name', provider_id))} added to background AI routing."
+
     async def _models_menu(self, chat_id: int) -> None:
         providers = self.state.get("providers", {})
         rows: list[list[dict[str, str]]] = []
         if isinstance(providers, dict):
             for provider_id, item in providers.items():
+                if not isinstance(item, dict):
+                    continue
                 name = str(item.get("name", provider_id))
-                count = len(item.get("models", [])) if isinstance(item.get("models"), list) else 0
-                active = " ✓" if provider_id == self.state.get("active_provider_id") else ""
-                rows.append([_button(f"{name}{active} · {count} models"[:60], f"provider:view:{provider_id}")])
-        pool_routes = self._routing_pool_payload()
-        rows.append([_button("🧭 Configure shared AI Router", "router:settings")])
+                models = item.get("models", [])
+                count = len(models) if isinstance(models, list) else 0
+                selected = " ✓" if self._selected_provider_model(provider_id) else ""
+                rows.append(
+                    [_button(f"{name}{selected} · {count} models"[:60], f"provider:view:{provider_id}")]
+                )
         rows.append([_button("➕ Add model provider", "provider:add")])
         rows.append([_button("⬅️ Main menu", "menu:home")])
         await self.render_menu(
             chat_id,
             "<b>Models</b>\n"
-            "Select a provider to browse its discovered models.\n"
-            f"<b>AI Router:</b> {len(pool_routes) + (1 if self._active_provider() else 0)} configured routes\n"
-            "Add providers and select one model per route. The encrypted provider records are shared by all Strix agents.",
+            "Open any provider and choose one model. The first selected model becomes the default; "
+            "each additional selected provider joins background AI routing automatically.",
             rows,
         )
 
@@ -970,7 +908,8 @@ class ARESBot:
         *,
         notice: str | None = None,
     ) -> None:
-        provider = self.state.get("providers", {}).get(provider_id)
+        providers = self.state.get("providers", {})
+        provider = providers.get(provider_id) if isinstance(providers, dict) else None
         if not isinstance(provider, dict):
             await self.render_menu(chat_id, "Provider not found.", [[_button("⬅️ Models", "models:list")]])
             return
@@ -982,12 +921,15 @@ class ARESBot:
         page = max(0, min(page, page_count - 1))
         start = page * page_size
         visible = models[start : start + page_size]
+        selected_model = self._selected_provider_model(provider_id)
         rows: list[list[dict[str, str]]] = []
         for index in range(0, len(visible), 2):
             row = []
             for local_index, model in enumerate(visible[index : index + 2], start=index):
                 model_index = start + local_index
                 label = model_button_label(provider, model)
+                if str(model) == selected_model:
+                    label += " ✓"
                 row.append(_button(label, f"model:select:{provider_id}:{model_index}"))
             rows.append(row)
         navigation: list[dict[str, str]] = []
@@ -999,107 +941,17 @@ class ARESBot:
             rows.append(navigation)
         rows.append([_button("🗑 Remove provider", f"provider:delete:{provider_id}")])
         rows.append([_button("⬅️ Providers", "models:list"), _button("Main menu", "menu:home")])
-        active = self.state.get("active_model")
         model_range = f"{start + 1}–{start + len(visible)} of {len(models)}" if models else "No models discovered"
+        selected_text = (
+            f"Selected: <code>{_h(selected_model)}</code>"
+            if selected_model
+            else "No model selected yet."
+        )
         menu_text = (
             f"<b>{_h(provider.get('name', provider_id))}</b>\n"
             f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
-            f"Active model: <code>{_h(active or 'none')}</code>\n\n"
-            "Choose a model. The catalog refreshes automatically whenever you open this provider."
-        )
-        if notice:
-            menu_text = f"{_h(notice)}\n\n" + menu_text
-        await self.render_menu(chat_id, menu_text, rows)
-
-    async def _failover_menu(self, chat_id: int, *, notice: str | None = None) -> None:
-        providers = self.state.get("providers", {})
-        if not isinstance(providers, dict):
-            providers = {}
-        primary_id = self.state.get("active_provider_id")
-        fallback = self._fallback_selection()
-        rows: list[list[dict[str, str]]] = []
-        if fallback:
-            rows.append([_button("🛑 Disable failover", "failover:disable")])
-        for provider_id, provider in providers.items():
-            if not isinstance(provider, dict) or provider_id == primary_id:
-                continue
-            name = str(provider.get("name", provider_id))
-            count = len(provider.get("models", [])) if isinstance(provider.get("models"), list) else 0
-            selected = " ✓" if fallback and fallback[0].get("id") == provider.get("id") else ""
-            rows.append([
-                _button(
-                    f"Backup: {name}{selected} · {count} models"[:60],
-                    f"failover:provider:{provider_id}",
-                )
-            ])
-        if not any(row for row in rows if row[0]["callback_data"] != "failover:disable"):
-            rows.append([_button("➕ Add another provider", "provider:add")])
-        rows.append([_button("⬅️ Models", "models:list")])
-        fallback_text = (
-            f"<b>Selected backup:</b> {_h(fallback[0].get('name', 'Provider'))} "
-            f"/ <code>{_h(fallback[1])}</code>"
-            if fallback
-            else "<b>Selected backup:</b> Not configured"
-        )
-        menu_text = (
-            "<b>Provider failover</b>\n"
-            f"Primary: <code>{_h(self.state.get('active_model') or 'not selected')}</code>\n"
-            f"{fallback_text}\n\n"
-            "Choose a different saved provider, then choose a backup model with "
-            "tool/function calling and enough context for the same scan. "
-            "Only temporary provider errors trigger failover; authentication, "
-            "invalid-model, context and policy errors do not."
-        )
-        if notice:
-            menu_text = f"{_h(notice)}\n\n" + menu_text
-        await self.render_menu(chat_id, menu_text, rows)
-
-    async def _fallback_provider_models(
-        self,
-        chat_id: int,
-        provider_id: str,
-        page: int = 0,
-        *,
-        notice: str | None = None,
-    ) -> None:
-        providers = self.state.get("providers", {})
-        provider = providers.get(provider_id) if isinstance(providers, dict) else None
-        if not isinstance(provider, dict) or provider_id == self.state.get("active_provider_id"):
-            await self._failover_menu(chat_id, notice="Choose a provider different from the active primary.")
-            return
-        models = provider.get("models", [])
-        if not isinstance(models, list):
-            models = []
-        page_size = 10
-        page_count = max(1, (len(models) + page_size - 1) // page_size)
-        page = max(0, min(page, page_count - 1))
-        start = page * page_size
-        visible = models[start : start + page_size]
-        rows: list[list[dict[str, str]]] = []
-        for index in range(0, len(visible), 2):
-            row = []
-            for local_index, model in enumerate(visible[index : index + 2], start=index):
-                model_index = start + local_index
-                row.append(
-                    _button(
-                        model_button_label(provider, model),
-                        f"failover:model:{provider_id}:{model_index}",
-                    )
-                )
-            rows.append(row)
-        navigation: list[dict[str, str]] = []
-        if page > 0:
-            navigation.append(_button("⬅️ Previous", f"failover:page:{provider_id}:{page - 1}"))
-        if page + 1 < page_count:
-            navigation.append(_button("Next ➡️", f"failover:page:{provider_id}:{page + 1}"))
-        if navigation:
-            rows.append(navigation)
-        rows.append([_button("⬅️ Backup providers", "failover:settings")])
-        model_range = f"{start + 1}–{start + len(visible)} of {len(models)}" if models else "No models discovered"
-        menu_text = (
-            f"<b>Backup model · {_h(provider.get('name', provider_id))}</b>\n"
-            f"Models: <b>{model_range}</b> · Page {page + 1}/{page_count}\n"
-            "Choose the model to use only when the primary provider is temporarily unavailable."
+            f"{selected_text}\n\n"
+            "Choose one model. Every provider with a selected model is used automatically by background AI routing."
         )
         if notice:
             menu_text = f"{_h(notice)}\n\n" + menu_text
@@ -1179,12 +1031,10 @@ class ARESBot:
                         self.state["active_provider_id"] = provider_id
                         self.state["active_model"] = None
                     self.state["pending"] = None
-                    actions = [[_button("Browse models", f"provider:view:{provider_id}")]]
-                    if became_primary:
-                        actions.append([_button("Models list", "models:list")])
-                    else:
-                        actions.append([_button("🧭 Add to shared AI Router", f"router:provider:{provider_id}")])
-                        actions.append([_button("Models list", "models:list")])
+                    actions = [
+                        [_button("Browse models", f"provider:view:{provider_id}")],
+                        [_button("Models list", "models:list")],
+                    ]
                     await self.render_menu(
                         chat_id,
                         f"✅ <b>Provider added</b>\nName: <b>{_h(provider['name'])}</b>\nModels discovered: <b>{len(models)}</b>",
@@ -1605,10 +1455,9 @@ class ARESBot:
         )
         return [
             [_button("🤖 Agents", "run:agents"), _button("🔎 Findings", "run:findings")],
-            [_button("🧾 Events", "run:events"), _button("🔌 MCP status", "mcp:status")],
+            [_button("🔌 MCP status", "mcp:status")],
             [budget_button],
             [_button("🛑 Stop scan", "run:stop"), _button("📄 Report", "run:report")],
-            [_button("🌐 Strix Viewer", "run:viewer")],
             [_button("⬅️ Main menu", "menu:home")],
         ]
 
@@ -1786,7 +1635,6 @@ class ARESBot:
             text,
             [[_button("✉️ Send instruction", f"agent:message:{agent_id}"),
               _button("⏹ Stop agent", f"agent:stop:{agent_id}")],
-             [_button("🧾 Agent events", f"agent:events:{agent_id}")],
              [_button("⬅️ Agents", "run:agents")]],
         )
 
@@ -1833,45 +1681,6 @@ class ARESBot:
             rows.append([_button("⬅️ Run controls", "run:dashboard")])
         await self.send_long(chat_id, "\n\n".join(lines), rows or None)
         return True
-
-    async def _show_events(self, chat_id: int) -> None:
-        events = self.adapter.snapshot().get("events", [])
-        if not isinstance(events, list) or not events:
-            await self.send_long(chat_id, "Recent Strix events\nNo Strix events have been recorded yet.")
-            return
-        lines = ["Recent Strix events"]
-        for item in events[-12:]:
-            if not isinstance(item, dict):
-                continue
-            agent = str(item.get("agent_id", "agent"))[:12]
-            payload = item.get("data", {})
-            if not isinstance(payload, dict):
-                payload = {}
-            content = payload.get("content") or payload.get("tool_name") or payload.get("output") or ""
-            if isinstance(content, (dict, list)):
-                content = json.dumps(content, ensure_ascii=False)
-            lines.append(
-                f"• {agent} · {item.get('type', 'event')}\n{str(content)[:700]}"
-            )
-        await self.send_long(chat_id, "\n\n".join(lines))
-
-    async def _show_agent_events(self, chat_id: int, agent_id: str) -> None:
-        events = self.adapter.events_for_agent(agent_id)
-        if not events:
-            await self.send_long(chat_id, f"Agent events · {agent_id}\nNo transcript/events are available.")
-            return
-        lines = [f"Agent events · {agent_id}"]
-        for item in events[-8:]:
-            if not isinstance(item, dict):
-                continue
-            payload = item.get("data", {})
-            if not isinstance(payload, dict):
-                payload = {}
-            content = payload.get("content") or payload.get("tool_name") or payload.get("output") or ""
-            if isinstance(content, (dict, list)):
-                content = json.dumps(content, ensure_ascii=False)
-            lines.append(f"{item.get('type', 'event')}\n{str(content)[:900]}")
-        await self.send_long(chat_id, "\n\n".join(lines))
 
     async def _show_finding(self, chat_id: int, index: int) -> None:
         run_name = self.state.get("ui_findings_run_name")
@@ -1920,26 +1729,6 @@ class ARESBot:
         )
         keyboard.append([_button("⬅️ Back to findings", back_callback)])
         await self.send_long(chat_id, "\n\n".join(chunks), keyboard)
-
-    async def _open_viewer(self, chat_id: int) -> None:
-        try:
-            result = await self.adapter.open_viewer()
-            url = result.get("url")
-            if url:
-                await self.send_long(
-                    chat_id,
-                    "Strix Viewer started on the GitHub Runner. Its URL is private to that worker "
-                    "and cannot be opened directly from Telegram without a secure tunnel.\n"
-                    f"Runner-local URL: {url}",
-                )
-            else:
-                await self.send_long(
-                    chat_id,
-                    f"Viewer status: {result.get('status', 'unavailable')}\n"
-                    f"{result.get('error', 'No viewer URL returned')}",
-                )
-        except Exception as exc:
-            await self.send_long(chat_id, f"Viewer could not start: {str(exc)[:1000]}")
 
     async def _show_history(self, chat_id: int) -> None:
         rows = []
@@ -2116,151 +1905,6 @@ class ARESBot:
                 await self._consume_pending(chat_id, "-")
             elif data == "models:list":
                 await self._models_menu(chat_id)
-            elif data == "router:settings":
-                await self._router_menu(chat_id)
-            elif data == "router:add":
-                await self._router_add_menu(chat_id)
-            elif action == "router" and len(parts) == 3 and parts[1] == "addpage":
-                await self._router_add_menu(chat_id, int(parts[2]))
-            elif action == "router" and len(parts) == 3 and parts[1] == "provider":
-                provider_id = parts[2]
-                if provider_id == self.state.get("active_provider_id"):
-                    raise ValueError("The primary route is already included automatically.")
-                try:
-                    await self._refresh_provider_catalog(provider_id)
-                except Exception as exc:
-                    logger.warning("Router provider refresh failed for %s: %s", provider_id, type(exc).__name__)
-                    await self._router_provider_models(
-                        chat_id, provider_id, 0,
-                        notice="Could not refresh the model catalog; showing saved models.",
-                    )
-                else:
-                    await self._router_provider_models(chat_id, provider_id, 0)
-            elif action == "router" and len(parts) == 4 and parts[1] == "page":
-                await self._router_provider_models(chat_id, parts[2], int(parts[3]))
-            elif action == "router" and len(parts) == 4 and parts[1] == "model":
-                provider_id = parts[2]
-                providers = self.state.get("providers", {})
-                provider = providers.get(provider_id) if isinstance(providers, dict) else None
-                models = provider.get("models", []) if isinstance(provider, dict) else []
-                index = int(parts[3])
-                if not isinstance(models, list) or not 0 <= index < len(models):
-                    raise ValueError("Router model selection is no longer valid")
-                if not isinstance(provider, dict):
-                    raise ValueError("Provider was not found")
-                pool = self.state.setdefault("routing_pool", [])
-                if not isinstance(pool, list):
-                    pool = []
-                pool = [item for item in pool if not isinstance(item, dict) or item.get("provider_id") != provider_id]
-                pool.append(
-                    {
-                        "provider_id": provider_id,
-                        "model": str(models[index]),
-                        "weight": 1,
-                        "max_concurrency": 2,
-                    }
-                )
-                self.state["routing_pool"] = pool
-                # A legacy backup entry is superseded by the explicit route.
-                if self.state.get("fallback_provider_id") == provider_id:
-                    self.state["fallback_provider_id"] = None
-                    self.state["fallback_model"] = None
-                await self._router_menu(chat_id, notice=f"Added {_h(provider.get('name', provider_id))} to the route pool.")
-            elif action == "router" and len(parts) == 4 and parts[1] == "weight":
-                provider_id, value = parts[2], int(parts[3])
-                if not 1 <= value <= 10:
-                    raise ValueError("Weight must be between 1 and 10")
-                pool = self.state.get("routing_pool", [])
-                updated = False
-                if isinstance(pool, list):
-                    for item in pool:
-                        if isinstance(item, dict) and item.get("provider_id") == provider_id:
-                            item["weight"] = value
-                            updated = True
-                if not updated and self.state.get("fallback_provider_id") == provider_id:
-                    pool = self.state.setdefault("routing_pool", [])
-                    pool.append(
-                        {
-                            "provider_id": provider_id,
-                            "model": self.state.get("fallback_model"),
-                            "weight": value,
-                            "max_concurrency": 2,
-                        }
-                    )
-                    self.state["fallback_provider_id"] = None
-                    self.state["fallback_model"] = None
-                await self._router_menu(chat_id, notice="Provider weight updated.")
-            elif action == "router" and len(parts) == 4 and parts[1] == "concurrency":
-                provider_id, value = parts[2], int(parts[3])
-                if not 1 <= value <= 8:
-                    raise ValueError("Provider concurrency must be between 1 and 8")
-                pool = self.state.get("routing_pool", [])
-                updated = False
-                if isinstance(pool, list):
-                    for item in pool:
-                        if isinstance(item, dict) and item.get("provider_id") == provider_id:
-                            item["max_concurrency"] = value
-                            updated = True
-                if not updated and self.state.get("fallback_provider_id") == provider_id:
-                    pool = self.state.setdefault("routing_pool", [])
-                    pool.append(
-                        {
-                            "provider_id": provider_id,
-                            "model": self.state.get("fallback_model"),
-                            "weight": 1,
-                            "max_concurrency": value,
-                        }
-                    )
-                    self.state["fallback_provider_id"] = None
-                    self.state["fallback_model"] = None
-                await self._router_menu(chat_id, notice="Provider concurrency updated.")
-            elif action == "router" and len(parts) == 3 and parts[1] == "remove":
-                provider_id = parts[2]
-                pool = self.state.get("routing_pool", [])
-                if isinstance(pool, list):
-                    self.state["routing_pool"] = [
-                        item for item in pool
-                        if not isinstance(item, dict) or item.get("provider_id") != provider_id
-                    ]
-                if self.state.get("fallback_provider_id") == provider_id:
-                    self.state["fallback_provider_id"] = None
-                    self.state["fallback_model"] = None
-                await self._router_menu(chat_id, notice="Provider route removed.")
-            elif data == "failover:settings":
-                await self._failover_menu(chat_id)
-            elif data == "failover:disable":
-                self.state["fallback_provider_id"] = None
-                self.state["fallback_model"] = None
-                await self._failover_menu(chat_id, notice="Provider failover disabled.")
-            elif action == "failover" and len(parts) == 3 and parts[1] == "provider":
-                provider_id = parts[2]
-                if provider_id == self.state.get("active_provider_id"):
-                    raise ValueError("Backup provider must be different from the active primary.")
-                try:
-                    await self._refresh_provider_catalog(provider_id)
-                except Exception as exc:
-                    logger.warning("Backup provider refresh failed for %s: %s", provider_id, type(exc).__name__)
-                    await self._fallback_provider_models(
-                        chat_id, provider_id, 0,
-                        notice="Could not refresh the catalog; showing saved models.",
-                    )
-                else:
-                    await self._fallback_provider_models(chat_id, provider_id, 0)
-            elif action == "failover" and len(parts) == 4 and parts[1] == "page":
-                await self._fallback_provider_models(chat_id, parts[2], int(parts[3]))
-            elif action == "failover" and len(parts) == 4 and parts[1] == "model":
-                provider_id = parts[2]
-                if provider_id == self.state.get("active_provider_id"):
-                    raise ValueError("Backup provider must be different from the active primary.")
-                providers = self.state.get("providers", {})
-                provider = providers.get(provider_id) if isinstance(providers, dict) else None
-                models = provider.get("models", []) if isinstance(provider, dict) else []
-                index = int(parts[3])
-                if not isinstance(models, list) or not 0 <= index < len(models):
-                    raise ValueError("Backup model selection is no longer valid")
-                self.state["fallback_provider_id"] = provider_id
-                self.state["fallback_model"] = str(models[index])
-                await self._failover_menu(chat_id, notice="Backup model saved.")
             elif data == "provider:add":
                 await self._begin_provider(chat_id)
             elif data == "provider:cancel":
@@ -2278,9 +1922,6 @@ class ARESBot:
                     await self.render_menu(chat_id, "<b>Add model provider · 2/3</b>\nSend the API Base URL again.", [[_button("Cancel", "provider:cancel")]])
                 else:
                     raise ValueError("Unknown provider setup step")
-            elif action == "provider" and len(parts) == 3 and parts[1] == "refresh":
-                await self._refresh_provider_catalog(parts[2])
-                await self._provider_models(chat_id, parts[2], 0)
             elif action == "provider" and len(parts) == 3 and parts[1] == "view":
                 try:
                     await self._refresh_provider_catalog(parts[2])
@@ -2323,17 +1964,15 @@ class ARESBot:
             elif action == "model" and len(parts) == 4 and parts[1] == "page":
                 await self._provider_models(chat_id, parts[2], int(parts[3]))
             elif action == "model" and len(parts) == 4 and parts[1] == "select":
-                provider = self.state.get("providers", {}).get(parts[2])
-                index = int(parts[3])
+                provider_id = parts[2]
+                providers = self.state.get("providers", {})
+                provider = providers.get(provider_id) if isinstance(providers, dict) else None
                 models = provider.get("models", []) if isinstance(provider, dict) else []
+                index = int(parts[3])
                 if not isinstance(models, list) or not 0 <= index < len(models):
                     raise ValueError("Model selection is no longer valid")
-                self.state["active_provider_id"] = parts[2]
-                self.state["active_model"] = str(models[index])
-                if self.state.get("fallback_provider_id") == parts[2]:
-                    self.state["fallback_provider_id"] = None
-                    self.state["fallback_model"] = None
-                await self.show_home(chat_id)
+                notice = self._remember_provider_model(provider_id, str(models[index]))
+                await self._provider_models(chat_id, provider_id, notice=notice)
             elif data == "scan:new":
                 self.state["pending"] = {"kind": "scan", "step": "target"}
                 await self.render_menu(
@@ -2374,12 +2013,6 @@ class ARESBot:
                         query_id, "No findings have been recorded yet.", show_alert=True
                     )
                     callback_answered = True
-            elif data == "run:events":
-                await self._show_events(chat_id)
-            elif data == "run:viewer":
-                await self._open_viewer(chat_id)
-            elif action == "agent" and len(parts) == 3 and parts[1] == "events":
-                await self._show_agent_events(chat_id, parts[2])
             elif action == "finding" and len(parts) == 3 and parts[1] == "view":
                 await self._show_finding(chat_id, int(parts[2]))
             elif action == "finding" and len(parts) == 3 and parts[1] == "delete":
@@ -2791,9 +2424,6 @@ class ARESBot:
             return
         if command == "/runs":
             await self._show_history(chat_id)
-            return
-        if command == "/events":
-            await self._show_events(chat_id)
             return
         if command == "/resume":
             if len(text.split(maxsplit=1)) > 1:

@@ -33,19 +33,15 @@ Open Models → Add model provider. The three prompts are exactly:
 
 No JSON or LiteLLM provider identifier is requested. ARES discovers models from the provider's OpenAI-compatible /v1/models or /models endpoint and routes the model through Strix's OpenAI-compatible LiteLLM adapter. This onboarding path is for providers exposing that compatible API surface; proprietary APIs with different auth or model-list formats need a dedicated connector and are not assumed to work automatically.
 
-Model pages show ten models at a time in two columns. You can refresh a provider's catalog without re-entering the token. The selected model is passed to Strix using its LiteLLM configuration.
+Model pages show ten models at a time in two columns. The catalog refreshes automatically when a provider is opened. Choose one model for each provider you want available to Strix. The first selected model becomes the default; every additional selected provider is added automatically to the same background routing pool. There is one provider list and no separate Router or Backup setup screen.
 
-## Shared AI provider router
-
-ARES supports a shared provider pool rather than a single primary/backup pair. Choose one primary model in Models, then open **Configure shared AI Router** to add one compatible model route per additional provider. Adding or removing providers and changing route settings is done through Telegram; no code change is required.
-
-Each Strix agent request uses the same scan-wide router. The default scheduler is weighted least-in-flight: it prefers a healthy provider with fewer active requests relative to its weight. Each route has a configurable weight (1–10) and per-provider parallel-request cap (1–8); the existing scan-wide `ARES_MAX_CONCURRENT_LLM_REQUESTS` limit remains the global upper bound (default 2, allowed 1–8).
+Each Strix agent request uses the shared scan-wide router. The default scheduler is weighted least-in-flight: it prefers a healthy provider with fewer active requests relative to its weight. Automatically enrolled routes use a weight of 1 and a per-provider parallel-request cap of 2; the scan-wide `ARES_MAX_CONCURRENT_LLM_REQUESTS` limit remains the global upper bound (default 2, allowed 1–8).
 
 Temporary capacity, network, timeout and server errors trigger an attempt on another healthy route. A failing provider enters an exponential cooldown (60 seconds up to 5 minutes); it is automatically reconsidered after cooldown and returns to normal service after a successful probe. Authentication, invalid-model, context and policy errors are not retried through other providers. Streams can switch routes only before their first event, so partial text or tool calls are never replayed.
 
 All pool routes use the OpenAI-compatible Chat Completions interface and must match the primary model's Strix strict/non-strict tool-schema mode. ARES can check the schema mode and the configured API shape, but OpenAI-compatible model catalogs do not reliably expose context-window size or full tool/function-calling quality. Select models that support Strix tool calls and have enough context for the same scan; compatibility of every tool and context limit cannot be guaranteed from `/models` alone. A provider must expose `GET /models` or `GET /v1/models`.
 
-The former encrypted single-backup settings remain readable and are treated as an additional shared-pool route at scan startup until replaced in Router settings. Existing provider credentials remain encrypted in ARES state.
+Existing encrypted single-backup settings remain readable and are migrated into the background routing pool when a scan starts. Existing provider credentials remain encrypted in ARES state.
 
 ## Runner handoff and recovery
 
@@ -64,7 +60,7 @@ Recovery continues from the latest durable checkpoint, not from another process'
 - Scope: Auto, Diff or Full, with an optional diff base.
 - Budget and max turns: configured in Settings and passed to Strix's runner.
 - LLM request pressure: `ARES_MAX_CONCURRENT_LLM_REQUESTS` caps in-flight model requests across the scan (default `2`, allowed `1`–`8`). This bounds actual provider calls without blocking Strix's parent/child Agent orchestration.
-- Live controls: inspect agents, events and per-agent transcript; steer or stop an agent; pause/resume budget; inspect findings; and view reports. Scan history supports per-run and bulk deletion with confirmation. Findings from saved runs support per-finding and bulk withdrawal through Strix, with deletion audit metadata retained. The active scan and its findings are protected from deletion.
+- Live controls: inspect agents and the readable live activity stream; steer or stop an agent; pause/resume budget; inspect findings; and view reports. Events are shown in the live stream rather than a separate Events screen. Scan history supports per-run and bulk deletion with confirmation. Findings from saved runs support per-finding and bulk withdrawal through Strix, with deletion audit metadata retained. The active scan and its findings are protected from deletion.
 
 ## MCP connections
 
