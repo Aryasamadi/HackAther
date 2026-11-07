@@ -93,11 +93,12 @@ GitHub-hosted runners are temporary. ARES therefore treats each workflow run as 
 
 While a scan is active, ARES writes a durable checkpoint every 60 seconds by default (configurable from 30 to 300 seconds), immediately after a scan starts or resumes, after a manual stop, and during graceful worker shutdown. The latest complete checkpoint remains in repository storage independently of the Actions run that produced it. The workflow artifact `ares-strix-state` is retained as a secondary, 30-day compatibility fallback; it is no longer the primary source of truth.
 
-The encrypted lifecycle record distinguishes four intents:
+The encrypted lifecycle record distinguishes five intents:
 - `running`: a scan was active; after an unexpected worker loss, ARES may attempt automatic recovery.
 - `handoff`: the worker is shutting down normally; the next worker may attempt automatic recovery.
 - `manual_stop`: the operator explicitly stopped the scan in Telegram; the next worker must not restart it automatically. The saved run remains in Scan history and can be resumed manually when Strix marks it resumable.
 - `completed`: the scan finished; the next worker starts normally without resuming it.
+- `recovery_required`: the saved run is missing, failed, non-resumable or could not be resumed; ARES leaves it for operator inspection and does not enter an automatic retry loop.
 
 On startup, ARES first validates and restores the durable repository snapshot, then falls back to a legacy Actions artifact when needed. If earlier runtime runs exist but neither source can be restored, startup is refused rather than silently opening an empty history. Automatic Resume is attempted only for a recorded `running` or `handoff` run that Strix itself marks resumable; failed recovery is recorded as `recovery_required` to avoid an endless restart loop.
 
