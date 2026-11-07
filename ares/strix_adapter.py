@@ -762,8 +762,10 @@ class StrixAdapter:
         if (
             not run_name
             or Path(run_name).name != run_name
+            or "/" in run_name
+            or "\\" in run_name
             or run_name in {".", ".."}
-            or "\\x00" in run_name
+            or "\x00" in run_name
         ):
             raise ValueError("Invalid run name")
 
@@ -824,11 +826,9 @@ class StrixAdapter:
     def delete_finding_item(self, run_name: str, finding_id: str) -> dict[str, Any]:
         """Withdraw one finding through Strix 1.7.0's native ReportState API."""
         self._history_run_dir(run_name)
-        if (
-            self.running
-            and run_name == self.run_name
-            and self.report_state is not None
-        ):
+        if self.running and run_name == self.run_name:
+            raise ValueError("Findings cannot be deleted while their scan is active")
+        if self.report_state is not None and self.report_state.run_name == run_name:
             report_state = self.report_state
         else:
             report_state = ReportState(run_name=run_name)
@@ -845,8 +845,9 @@ class StrixAdapter:
 
     def delete_all_findings(self, run_name: str) -> dict[str, int]:
         """Withdraw every finding in one run; preserve Strix's deletion audit."""
+        if self.running and run_name == self.run_name:
+            raise ValueError("Findings cannot be deleted while their scan is active")
         findings = self.findings_for_run(run_name)
-        deleted = 0
         failed = 0
         for finding in findings:
             finding_id = finding.get("id")
@@ -862,7 +863,7 @@ class StrixAdapter:
                     run_name,
                 )
                 failed += 1
-        return {"deleted": deleted + (len(findings) - failed), "failed": failed}
+        return {"deleted": len(findings) - failed, "failed": failed}
 
     def report_markdown(self, run_name: str | None = None) -> str:
         name = run_name or self.run_name
