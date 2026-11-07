@@ -21,7 +21,7 @@ Only add these two repository Actions secrets:
 
 The workflow receives GITHUB_TOKEN and GITHUB_REPOSITORY automatically from GitHub Actions. The workflow grants the built-in token contents:write to store encrypted ARES state and manage the encrypted Strix snapshot release asset. No PAT or third user-managed secret is required.
 
-Run the workflow manually from Actions, or use the five-minute schedule on the default branch. Runtime workflows share a non-cancelling concurrency group: a deployment-triggered run waits for the current worker to finish its graceful handoff instead of force-cancelling it. The next worker restores the most recent encrypted Strix snapshot before starting the updated bot. Commits that only update encrypted state are excluded from the push trigger.
+Start the worker manually from Actions → ARES Telegram Runtime → Run workflow. Runtime workers share a non-cancelling concurrency group: a new dispatch waits for the current worker to complete its planned handoff instead of force-cancelling an active scan. Each worker runs for 340 minutes inside a 360-minute job limit, leaving time for graceful shutdown and final persistence.
 
 ## Provider setup
 
@@ -46,6 +46,14 @@ Temporary capacity, network, timeout and server errors trigger an attempt on ano
 All pool routes use the OpenAI-compatible Chat Completions interface and must match the primary model's Strix strict/non-strict tool-schema mode. ARES can check the schema mode and the configured API shape, but OpenAI-compatible model catalogs do not reliably expose context-window size or full tool/function-calling quality. Select models that support Strix tool calls and have enough context for the same scan; compatibility of every tool and context limit cannot be guaranteed from `/models` alone. A provider must expose `GET /models` or `GET /v1/models`.
 
 The former encrypted single-backup settings remain readable and are treated as an additional shared-pool route at scan startup until replaced in Router settings. Existing provider credentials remain encrypted in ARES state.
+
+## Runner handoff and recovery
+
+ARES creates an encrypted durable Strix snapshot every 60 seconds by default (`ARES_CHECKPOINT_INTERVAL_SECONDS`, allowed 30–300 seconds). It also checkpoints before requesting a planned handoff and again after Strix has gracefully stopped its in-memory agent tasks. On Linux, SIGTERM is converted into the same application shutdown path. A new worker restores the latest successfully uploaded snapshot and automatically resumes runs whose saved intent is `running` or `handoff`.
+
+The runtime workflow never cancels an active worker when another dispatch is queued. The configured worker window is 340 minutes with a 360-minute job timeout, so routine handoff has a safety margin. Manual `STOP` and completed runs are terminal and are not auto-resumed. If Strix has recorded a run as failed, ARES leaves it for inspection rather than looping automatic retries.
+
+Recovery continues from the latest durable checkpoint, not from another process's live memory or an in-flight HTTP request. Work performed after the last confirmed checkpoint may need to be replayed; a provider request cannot be transferred byte-for-byte to the next Runner. ARES snapshots live SQLite agent sessions using SQLite's backup API, checks the copied database, and keeps the previous remote snapshot if a new checkpoint cannot be validated or uploaded.
 
 ## Scan controls
 

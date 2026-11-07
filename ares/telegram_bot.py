@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import signal
 import time
 import unicodedata
 from pathlib import Path
@@ -262,22 +263,31 @@ class ARESBot:
         self.monitor_task: asyncio.Task[None] | None = None
         self.startup_task: asyncio.Task[None] | None = None
         self.checkpoint_task: asyncio.Task[None] | None = None
+        raw_checkpoint_interval = os.environ.get("ARES_CHECKPOINT_INTERVAL_SECONDS", "60").strip()
+        try:
+            self.checkpoint_interval_seconds = int(raw_checkpoint_interval)
+        except ValueError as exc:
+            raise RuntimeError("ARES_CHECKPOINT_INTERVAL_SECONDS must be an integer from 30 to 300") from exc
+        if not 30 <= self.checkpoint_interval_seconds <= 300:
+            raise RuntimeError("ARES_CHECKPOINT_INTERVAL_SECONDS must be between 30 and 300")
         self.chat_id: int | None = None
 
     def _set_scan_control(self, run_name: str, intent: str, status: str) -> None:
         previous = self.state.get("scan_control")
-        started_at = (
-            previous.get("started_at")
-            if isinstance(previous, dict) and previous.get("run_name") == run_name
-            else int(time.time())
-        )
-        self.state["scan_control"] = {
+        same_run = isinstance(previous, dict) and previous.get("run_name") == run_name
+        started_at = previous.get("started_at") if same_run else int(time.time())
+        control = {
             "run_name": run_name,
             "intent": intent,
             "status": status,
             "started_at": started_at,
             "updated_at": int(time.time()),
         }
+        if same_run:
+            for key in ("last_checkpoint_at", "checkpoint_sequence"):
+                if key in previous:
+                    control[key] = previous[key]
+        self.state["scan_control"] = control
 
     async def _save_state(self) -> None:
         await self.store.save(self.state)
@@ -295,16 +305,28 @@ class ARESBot:
                 admin_id=self.config.admin_id,
             )
             await self.snapshot_store.save(self.snapshot_path)
-            logger.info("Durable encrypted Strix checkpoint committed")
+            control = self.state.get("scan_control")
+            if isinstance(control, dict):
+                try:
+                    sequence = int(control.get("checkpoint_sequence", 0))
+                except (TypeError, ValueError):
+                    sequence = 0
+                control["last_checkpoint_at"] = int(time.time())
+                control["checkpoint_sequence"] = sequence + 1
+            logger.info(
+                "Durable encrypted Strix checkpoint committed (sequence=%s)",
+                control.get("checkpoint_sequence") if isinstance(control, dict) else "n/a",
+            )
             return True
 
     async def _checkpoint_loop(self) -> None:
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(self.checkpoint_interval_seconds)
             if not self.adapter.running:
                 continue
             try:
-                await asyncio.shield(self._checkpoint_snapshot())
+                if await asyncio.shield(self._checkpoint_snapshot()):
+                    await self._save_state()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -398,9 +420,40 @@ class ARESBot:
             (item for item in self.adapter.history() if item.get("run_name") == run_name),
             None,
         )
-        if history_item is None or not history_item.get("resumable"):
-            status = "history_missing" if history_item is None else "not_resumable"
-            self._set_scan_control(run_name, "recovery_required", status)
+        if history_item is None:
+            self._set_scan_control(run_name, "recovery_required", "history_missing")
+            await self._save_state()
+            await self.send(
+                self.config.admin_id,
+                f"⚠️ Previous Strix run <code>{_h(run_name)}</code> was not found in the "
+                "restored history. No new scan was started; the available history was preserved.",
+            )
+            return
+
+        history_status = str(history_item.get("status") or "unknown").casefold()
+        if history_status == "completed":
+            self._set_scan_control(run_name, "completed", "already_completed")
+            await self._save_state()
+            await self.send(
+                self.config.admin_id,
+                f"✅ Strix run <code>{_h(run_name)}</code> was already completed. "
+                "ARES will not start it again.",
+            )
+            return
+
+        if history_status == "failed":
+            self._set_scan_control(run_name, "recovery_required", "previous_run_failed")
+            await self._save_state()
+            await self.send(
+                self.config.admin_id,
+                f"⚠️ Strix run <code>{_h(run_name)}</code> was recorded as failed. "
+                "Automatic restart was withheld to avoid repeating a failed run. "
+                "Inspect its history before using Resume manually.",
+            )
+            return
+
+        if not history_item.get("resumable"):
+            self._set_scan_control(run_name, "recovery_required", "not_resumable")
             await self._save_state()
             await self.send(
                 self.config.admin_id,
@@ -423,20 +476,34 @@ class ARESBot:
 
     async def close(self) -> None:
         control = self.state.get("scan_control")
+        handoff_run: str | None = None
         if self.adapter.running:
             run_name = self.adapter.run_name or self.state.get("active_run")
             if isinstance(run_name, str) and run_name:
                 if not isinstance(control, dict) or control.get("intent") in {"running", "handoff"}:
                     self._set_scan_control(run_name, "handoff", "stopping_for_runner_handoff")
+                    handoff_run = run_name
         elif isinstance(control, dict) and control.get("intent") == "running":
             run_name = str(control.get("run_name") or self.state.get("active_run") or "")
             if run_name:
-                self._set_scan_control(run_name, "completed", "finished_before_runner_handoff")
+                snapshot = self.adapter.snapshot()
+                final_status = "failed" if snapshot.get("error") else str(snapshot.get("status") or "finished")
+                self._set_scan_control(run_name, "completed", final_status)
 
         try:
             await self._save_state()
         except Exception:
             logger.exception("Could not persist scan lifecycle before worker shutdown")
+
+        # Upload the latest live state before asking Strix to park its agents. If
+        # the process is killed during the graceful handoff, the last durable
+        # checkpoint still contains the pre-stop running state and can be resumed.
+        if handoff_run:
+            try:
+                if await asyncio.shield(self._checkpoint_snapshot()):
+                    await self._save_state()
+            except Exception:
+                logger.exception("Pre-handoff durable checkpoint failed; previous checkpoint remains intact")
 
         for task in (self.checkpoint_task, self.startup_task, self.monitor_task):
             if task is not None and not task.done():
@@ -445,7 +512,17 @@ class ARESBot:
                     await task
                 except asyncio.CancelledError:
                     pass
-        await self.adapter.close()
+        adapter_closed = False
+        try:
+            await self.adapter.close(preserve_for_resume=bool(handoff_run))
+            adapter_closed = True
+        except Exception:
+            logger.exception("Strix adapter did not finish its graceful handoff")
+        if handoff_run:
+            control = self.state.get("scan_control")
+            if isinstance(control, dict) and control.get("run_name") == handoff_run:
+                control["status"] = "handoff_stopped" if adapter_closed else "handoff_incomplete"
+                control["updated_at"] = int(time.time())
         try:
             await asyncio.shield(self._checkpoint_snapshot())
         except Exception:
@@ -1383,6 +1460,7 @@ class ARESBot:
             try:
                 await self._save_state()
                 await asyncio.shield(self._checkpoint_snapshot())
+                await self._save_state()
             except Exception:
                 await self.adapter.stop_scan()
                 self._set_scan_control(run_name, "recovery_required", "initial_checkpoint_failed")
@@ -1481,6 +1559,7 @@ class ARESBot:
             try:
                 await self._save_state()
                 await asyncio.shield(self._checkpoint_snapshot())
+                await self._save_state()
             except Exception:
                 await self.adapter.stop_scan()
                 self._set_scan_control(name, "recovery_required", "resume_checkpoint_failed")
@@ -2597,6 +2676,24 @@ async def async_main() -> None:
         else:
             missing_run = None
         bot = ARESBot(config, store, state, snapshot_store=snapshot_store)
+        loop = asyncio.get_running_loop()
+        main_task = asyncio.current_task()
+        shutdown_requested = False
+        sigterm_handler_installed = False
+
+        def _handle_sigterm() -> None:
+            nonlocal shutdown_requested
+            if not shutdown_requested and main_task is not None:
+                shutdown_requested = True
+                logger.warning("SIGTERM received; beginning durable ARES handoff")
+                main_task.cancel()
+
+        try:
+            loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+            sigterm_handler_installed = True
+        except (NotImplementedError, RuntimeError):
+            logger.warning("SIGTERM event-loop handler is unavailable on this platform")
+
         try:
             if history_recovery_gap:
                 # Establish the first durable baseline before polling Telegram.
@@ -2628,7 +2725,11 @@ async def async_main() -> None:
             await bot.recover_interrupted_scan()
             await bot.run()
         finally:
-            await bot.close()
+            try:
+                await bot.close()
+            finally:
+                if sigterm_handler_installed:
+                    loop.remove_signal_handler(signal.SIGTERM)
     finally:
         try:
             if state is not None:

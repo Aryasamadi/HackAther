@@ -3,10 +3,10 @@ name: ARES Telegram Runtime
 on:
   workflow_dispatch:
 
-# Manual starts replace an older worker in this repository only.
+# Serialize workers. A new dispatch must never cancel an active scan before it checkpoints.
 concurrency:
   group: ares-runtime-v2
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -15,12 +15,13 @@ permissions:
 jobs:
   telegram-runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 365
+    timeout-minutes: 360
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       ADMIN_ID: ${{ secrets.ADMIN_ID }}
       GITHUB_TOKEN: ${{ github.token }}
-      ARES_RUNTIME_MINUTES: "355"
+      ARES_RUNTIME_MINUTES: "340"
+      ARES_CHECKPOINT_INTERVAL_SECONDS: "60"
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_REF_NAME: ${{ github.ref_name }}
     steps:
