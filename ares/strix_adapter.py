@@ -675,10 +675,12 @@ class StrixAdapter:
             raise RuntimeError("No active Strix coordinator")
         await self.coordinator.resume_budget(max_budget_usd=max_budget_usd)
 
-    async def stop_scan(self) -> None:
+    async def stop_scan(self, *, preserve_for_resume: bool = False) -> None:
         if self.coordinator is None or not self.running:
             return
-        parents, _statuses, _names, _errors = await self.coordinator.graph_snapshot()
+        parents, statuses, _names, errors = await self.coordinator.graph_snapshot()
+        original_statuses = dict(statuses)
+        original_errors = dict(errors)
         roots = [agent_id for agent_id, parent in parents.items() if parent is None]
         if roots:
             await self.coordinator.cancel_descendants_graceful(roots[0])
@@ -689,13 +691,48 @@ class StrixAdapter:
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=20)
             except TimeoutError:
+                logger.warning(
+                    "Strix did not finish graceful shutdown within 20 seconds; "
+                    "cancelling the scan task so its final snapshot can run"
+                )
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
 
-    async def close(self) -> None:
+        if preserve_for_resume and self.coordinator is not None:
+            # Strix's graceful stop marks every agent stopped. That is correct
+            # for a user STOP, but a planned Runner handoff must make agents that
+            # were active/waiting eligible for native automatic respawn. Preserve
+            # terminal/user-stopped states unchanged.
+            async with self.coordinator._lock:
+                for agent_id, previous_status in original_statuses.items():
+                    if agent_id not in self.coordinator.statuses:
+                        continue
+                    restored_status = (
+                        "running" if str(previous_status) in {"running", "waiting"}
+                        else previous_status
+                    )
+                    self.coordinator._set_status_locked(
+                        agent_id,
+                        restored_status,
+                        error=(
+                            None
+                            if restored_status == "running"
+                            else original_errors.get(agent_id)
+                        ),
+                    )
+            await self.coordinator._maybe_snapshot()
+            logger.info(
+                "Prepared %d previously active/waiting Strix agent(s) for automatic Resume",
+                sum(
+                    1 for status in original_statuses.values()
+                    if str(status) in {"running", "waiting"}
+                ),
+            )
+
+    async def close(self, *, preserve_for_resume: bool = False) -> None:
         if self._sync_task is not None:
             self._sync_task.cancel()
             try:
@@ -703,7 +740,7 @@ class StrixAdapter:
             except asyncio.CancelledError:
                 pass
         if self.running:
-            await self.stop_scan()
+            await self.stop_scan(preserve_for_resume=preserve_for_resume)
         if self.controller is not None:
             self.controller.close_viewer()
 
