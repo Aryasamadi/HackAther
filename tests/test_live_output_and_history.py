@@ -75,6 +75,19 @@ def test_budget_control_is_one_state_dependent_toggle() -> None:
         if "budget" in button["callback_data"]
     ]
     assert callbacks == ["run:toggle_budget"]
+    all_callbacks = [
+        button["callback_data"]
+        for row in bot._run_keyboard()
+        for button in row
+    ]
+    labels = [
+        button["text"]
+        for row in bot._run_keyboard()
+        for button in row
+    ]
+    assert "run:events" not in all_callbacks
+    assert "run:viewer" not in all_callbacks
+    assert not any("Events" in label or "Viewer" in label for label in labels)
 
 
 def test_agent_detail_displays_escaped_failure_reason() -> None:
@@ -103,6 +116,8 @@ def test_agent_detail_displays_escaped_failure_reason() -> None:
     assert "401 Unauthorized" in message_text
     assert "&lt;html&gt;" in message_text
     assert "<html>" not in message_text
+    callbacks = [button["callback_data"] for row in _keyboard for button in row]
+    assert not any(callback.startswith("agent:events:") for callback in callbacks)
 
 
 def test_findings_are_sent_as_standalone_message_with_detail_buttons() -> None:

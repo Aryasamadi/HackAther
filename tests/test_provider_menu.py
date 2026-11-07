@@ -50,29 +50,58 @@ def test_failed_auto_refresh_keeps_saved_models_visible() -> None:
     )
 
 
-def test_provider_models_menu_has_no_separate_refresh_button() -> None:
+def test_provider_models_menu_marks_selected_model_and_has_no_router_controls() -> None:
     bot = object.__new__(ARESBot)
     bot.state = {
         "providers": {
             "provider-1": {
+                "id": "provider-1",
                 "name": "Example",
                 "models": ["vendor/model-a", "vendor/model-b"],
             }
         },
-        "active_model": None,
+        "active_provider_id": "provider-1",
+        "active_model": "vendor/model-b",
     }
     bot.render_menu = AsyncMock()
 
     asyncio.run(bot._provider_models(42, "provider-1"))
 
+    text = bot.render_menu.await_args.args[1]
     keyboard = bot.render_menu.await_args.args[2]
-    callbacks = [
-        button["callback_data"]
-        for row in keyboard
-        for button in row
-    ]
+    callbacks = [button["callback_data"] for row in keyboard for button in row]
+    labels = [button["text"] for row in keyboard for button in row]
+    assert "Selected:" in text
+    assert any(label == "model-b ✓" for label in labels)
+    assert not any(callback.startswith(("router:", "failover:")) for callback in callbacks)
     assert not any(callback.startswith("provider:refresh:") for callback in callbacks)
     assert "provider:delete:provider-1" in callbacks
+
+
+def test_models_menu_uses_one_provider_list_without_router_configuration() -> None:
+    bot = object.__new__(ARESBot)
+    bot.state = {
+        "providers": {
+            "one": {"id": "one", "name": "Provider One", "models": ["one/model"]},
+            "two": {"id": "two", "name": "Provider Two", "models": ["two/model"]},
+        },
+        "active_provider_id": "one",
+        "active_model": "one/model",
+        "routing_pool": [{"provider_id": "two", "model": "two/model"}],
+    }
+    bot.render_menu = AsyncMock()
+
+    asyncio.run(bot._models_menu(42))
+
+    text = bot.render_menu.await_args.args[1]
+    keyboard = bot.render_menu.await_args.args[2]
+    callbacks = [button["callback_data"] for row in keyboard for button in row]
+    labels = [button["text"] for row in keyboard for button in row]
+    assert "background AI routing automatically" in text
+    assert "provider:view:one" in callbacks
+    assert "provider:view:two" in callbacks
+    assert not any(callback.startswith(("router:", "failover:")) for callback in callbacks)
+    assert all("Router" not in label for label in labels)
 
 
 def test_home_menu_places_live_control_before_models() -> None:

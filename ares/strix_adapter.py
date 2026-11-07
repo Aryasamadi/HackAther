@@ -660,11 +660,6 @@ class StrixAdapter:
             raise RuntimeError("No active Strix controller")
         await self.controller.handle("agent.stop", {"agent_id": agent_id})
 
-    async def open_viewer(self) -> dict[str, Any]:
-        if self.controller is None:
-            raise RuntimeError("No active Strix controller")
-        return await self.controller.handle("viewer.open", {})
-
     async def pause_budget(self) -> None:
         if self.coordinator is None:
             raise RuntimeError("No active Strix coordinator")

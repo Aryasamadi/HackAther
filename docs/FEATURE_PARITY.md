@@ -18,18 +18,18 @@ This matrix tracks native Strix capabilities against the ARES Telegram adapter. 
 | --max-budget-usd | Scan budget setting + live pause/resume | Implemented |
 | --max-turns | Maximum turns setting | Implemented |
 | --resume | Scan history and resume; individual and bulk history deletion with confirmation | Implemented |
-| Live agent graph and events | Agent list, global events, per-agent events | Implemented |
+| Live agent graph and events | Agent list and readable live activity stream | Implemented |
 | Agent steering and stop | Agent details and controls; explicit two-step confirmation for scan STOP | Implemented |
 | Findings | List/detail; per-finding and bulk withdrawal for saved runs through Strix ReportState | Implemented |
 | Reports and usage | Markdown report and LLM usage summary | Implemented |
 | MCP connection lifecycle | Live status from Strix MCP status sink | Implemented |
-| Strix Viewer | Native viewer server can be started; runner-local URL only | Partial |
+| Strix Viewer | Not exposed in Telegram; runner-local URL requires a secure tunnel | Not mapped |
 | Headless --fail-on | Not applicable to interactive Telegram sessions | Not mapped |
 | CLI self-update | Managed by pinned package release, not exposed in Telegram | Not mapped |
 
 ## Explicit limitations
 
-- The Viewer listens on the GitHub-hosted runner. Its loopback URL is not reachable from a Telegram client without a separately configured secure tunnel. ARES reports this instead of exposing a misleading link.
+- The Strix Viewer listens on the GitHub-hosted runner. Its loopback URL is not reachable from a Telegram client without a separately configured secure tunnel, so it is intentionally not exposed as a Telegram control.
 - MCP onboarding is a guided form: name, transport, HTTP endpoint or STDIO command, optional Bearer token, optional tool allowlist and purpose notes. The collected fields are validated using Strix's native connection schema. Advanced timing/concurrency fields retain Strix defaults and are not yet exposed as Telegram controls.
 - Provider onboarding asks for display name, Base URL and token. Model discovery requires an OpenAI-compatible GET /v1/models or GET /models endpoint; non-compatible provider APIs are not assumed to work.
 - Several Strix interfaces used for interactive control are internal package interfaces. The Strix dependency is pinned, and CI tests imports and adapter contracts to catch compatibility drift.
