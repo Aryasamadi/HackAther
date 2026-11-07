@@ -83,7 +83,7 @@ def test_provider_pool_rejects_models_missing_from_catalog(tmp_path) -> None:
     primary = _provider("openai", "gpt-4o")
     other = _provider("gateway", "model-a")
 
-    with pytest.raises(ValueError, match="no longer in the catalog"):
+    with pytest.raises(ValueError, match="not in the saved catalog"):
         adapter._configure_provider_pool(
             primary,
             "gpt-4o",
