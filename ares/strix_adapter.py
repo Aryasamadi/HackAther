@@ -757,13 +757,18 @@ class StrixAdapter:
             for item in list_run_summaries()
         ]
 
-    def delete_history_item(self, run_name: str) -> None:
-        """Delete exactly one completed Strix run directory, never shared state."""
-        if not run_name or Path(run_name).name != run_name or run_name in {".", ".."}:
+    @staticmethod
+    def _validate_run_name(run_name: str) -> None:
+        if (
+            not run_name
+            or Path(run_name).name != run_name
+            or run_name in {".", ".."}
+            or "\\x00" in run_name
+        ):
             raise ValueError("Invalid run name")
-        if self.running and run_name == self.run_name:
-            raise ValueError("The active scan cannot be deleted")
 
+    def _history_run_dir(self, run_name: str) -> Path:
+        self._validate_run_name(run_name)
         known_runs = {item["run_name"] for item in self.history()}
         if run_name not in known_runs:
             raise ValueError("Run not found")
@@ -774,8 +779,90 @@ class StrixAdapter:
             raise ValueError("Run path is outside the Strix history directory")
         if not target.is_dir() or not (target / "run.json").is_file():
             raise ValueError("Run not found")
+        return target
 
+    def delete_history_item(self, run_name: str) -> None:
+        """Delete exactly one run directory, never shared runtime or ARES state."""
+        target = self._history_run_dir(run_name)
+        if self.running and run_name == self.run_name:
+            raise ValueError("The active scan cannot be deleted")
         shutil.rmtree(target)
+
+    def delete_all_history_items(self) -> dict[str, int]:
+        """Delete every saved run except the currently active scan."""
+        deleted = 0
+        skipped_active = 0
+        for item in list(self.history()):
+            run_name = str(item.get("run_name") or "")
+            if self.running and run_name == self.run_name:
+                skipped_active += 1
+                continue
+            self.delete_history_item(run_name)
+            deleted += 1
+        return {"deleted": deleted, "skipped_active": skipped_active}
+
+    def findings_for_run(self, run_name: str | None = None) -> list[dict[str, Any]]:
+        """Read findings from the active report state or a saved run index."""
+        name = run_name or self.run_name
+        if not name:
+            return []
+        if self.report_state is not None and self.report_state.run_name == name:
+            return self.report_state.get_existing_vulnerabilities()
+
+        run_dir = self._history_run_dir(name)
+        path = run_dir / "vulnerabilities.json"
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Could not read findings for run {name}") from exc
+        if not isinstance(raw, list):
+            raise RuntimeError(f"Findings index for run {name} is not a list")
+        return [item for item in raw if isinstance(item, dict)]
+
+    def delete_finding_item(self, run_name: str, finding_id: str) -> dict[str, Any]:
+        """Withdraw one finding through Strix 1.7.0's native ReportState API."""
+        self._history_run_dir(run_name)
+        if (
+            self.running
+            and run_name == self.run_name
+            and self.report_state is not None
+        ):
+            report_state = self.report_state
+        else:
+            report_state = ReportState(run_name=run_name)
+            report_state.hydrate_from_run_dir()
+
+        deleted = report_state.delete_vulnerability_report(
+            finding_id,
+            delete_reason="Removed by the authorized ARES administrator through Telegram.",
+            deleted_by_agent_name="ARES administrator",
+        )
+        if deleted is None:
+            raise ValueError("Finding not found")
+        return deleted
+
+    def delete_all_findings(self, run_name: str) -> dict[str, int]:
+        """Withdraw every finding in one run; preserve Strix's deletion audit."""
+        findings = self.findings_for_run(run_name)
+        deleted = 0
+        failed = 0
+        for finding in findings:
+            finding_id = finding.get("id")
+            if not isinstance(finding_id, str) or not finding_id:
+                failed += 1
+                continue
+            try:
+                self.delete_finding_item(run_name, finding_id)
+            except Exception:
+                logger.exception(
+                    "Could not delete finding %s from Strix run %s",
+                    finding_id,
+                    run_name,
+                )
+                failed += 1
+        return {"deleted": deleted + (len(findings) - failed), "failed": failed}
 
     def report_markdown(self, run_name: str | None = None) -> str:
         name = run_name or self.run_name
