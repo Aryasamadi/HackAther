@@ -80,3 +80,20 @@ def test_remove_inactive_provider_preserves_active_selection() -> None:
     assert state["active_provider_id"] == "one"
     assert state["active_model"] == "model-a"
     assert remove_provider(state, "missing") is False
+
+
+
+def test_remove_provider_also_removes_its_shared_router_route() -> None:
+    state = {
+        "providers": {"one": {"api_key": "secret"}, "two": {"api_key": "other"}},
+        "active_provider_id": "two",
+        "active_model": "model-b",
+        "routing_pool": [
+            {"provider_id": "one", "model": "model-a", "weight": 2},
+            {"provider_id": "two", "model": "model-b", "weight": 1},
+        ],
+    }
+    assert remove_provider(state, "one") is True
+    assert state["routing_pool"] == [
+        {"provider_id": "two", "model": "model-b", "weight": 1}
+    ]

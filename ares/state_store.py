@@ -18,6 +18,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "providers": {},
     "active_provider_id": None,
     "active_model": None,
+    "routing_pool": [],
     "pending": None,
     "settings": {
         "scan_mode": "deep",

@@ -81,6 +81,12 @@ def remove_provider(state: dict[str, object], provider_id: str) -> bool:
     if state.get("fallback_provider_id") == provider_id:
         state["fallback_provider_id"] = None
         state["fallback_model"] = None
+    routing_pool = state.get("routing_pool")
+    if isinstance(routing_pool, list):
+        state["routing_pool"] = [
+            item for item in routing_pool
+            if not isinstance(item, dict) or item.get("provider_id") != provider_id
+        ]
     return True
 
 

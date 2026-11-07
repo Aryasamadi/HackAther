@@ -18,6 +18,7 @@ from strix.interface.scan_setup import (
     build_targets_info,
     prepare_run,
     preflight_model_connection,
+    preflight_request,
     telemetry_start,
 )
 from strix.interface.tui.backend.controller import TuiController
@@ -56,6 +57,7 @@ class StrixAdapter:
         self._model_ref: str | None = None
         self._fallback_provider: dict[str, Any] | None = None
         self._fallback_model: str | None = None
+        self._provider_pool: list[dict[str, Any]] | None = None
         raw_request_limit = os.environ.get("ARES_MAX_CONCURRENT_LLM_REQUESTS", "2").strip()
         try:
             self.max_concurrent_llm_requests = int(raw_request_limit)
@@ -98,6 +100,7 @@ class StrixAdapter:
             raise ValueError("Fallback provider and model must be configured together")
         self._fallback_provider = None
         self._fallback_model = None
+        self._provider_pool = None
         if fallback_provider is None or fallback_model is None:
             return
         if fallback_provider.get("id") == primary_provider.get("id"):
@@ -150,6 +153,167 @@ class StrixAdapter:
 
         self._fallback_provider = dict(fallback_provider)
         self._fallback_model = fallback_model
+        self._provider_pool = None
+
+    def _configure_provider_pool(
+        self,
+        primary_provider: dict[str, Any],
+        primary_model: str,
+        additional_routes: list[dict[str, Any]],
+    ) -> None:
+        """Validate and prepare the primary plus every enabled shared-pool route."""
+        from ares.providers import build_model_reference
+        from strix.config.models import supports_strict_tool_schemas
+
+        if self._model_ref is None:
+            raise RuntimeError("Primary model configuration was not initialized")
+        routes: list[dict[str, Any]] = []
+        seen_provider_ids: set[str] = set()
+        primary_schema_mode = supports_strict_tool_schemas(self._model_ref)
+
+        def add_route(
+            provider: dict[str, Any],
+            model: str,
+            *,
+            weight: int = 1,
+            max_concurrency: int = 2,
+        ) -> None:
+            if not isinstance(provider, dict):
+                raise ValueError("Provider pool contains an invalid provider record")
+            required = ("id", "litellm_id", "api_key", "base_url")
+            if any(not str(provider.get(key, "")).strip() for key in required):
+                raise ValueError("A provider pool route is missing credentials or routing metadata")
+            provider_id = str(provider["id"])
+            if provider_id in seen_provider_ids:
+                raise ValueError("The AI Router accepts one model per provider at a time")
+            models = provider.get("models", [])
+            if not isinstance(models, list) or model not in models:
+                raise ValueError(
+                    f"Model {model!r} is not in the saved catalog for "
+                    f"{provider.get('name', provider_id)}. Refresh its model list."
+                )
+            if isinstance(weight, bool) or not 1 <= int(weight) <= 10:
+                raise ValueError("Provider weight must be between 1 and 10")
+            if isinstance(max_concurrency, bool) or not 1 <= int(max_concurrency) <= 8:
+                raise ValueError("Provider concurrency must be between 1 and 8")
+            model_ref = build_model_reference(str(provider["litellm_id"]), model)
+            if supports_strict_tool_schemas(model_ref) != primary_schema_mode:
+                raise ValueError(
+                    f"{provider.get('name', provider_id)} / {model} has an incompatible "
+                    "Strix tool-schema mode. Choose a model with the same strict-schema "
+                    "compatibility as the primary model."
+                )
+            seen_provider_ids.add(provider_id)
+            routes.append(
+                {
+                    "provider": dict(provider),
+                    "model": model,
+                    "weight": int(weight),
+                    "max_concurrency": int(max_concurrency),
+                }
+            )
+
+        add_route(primary_provider, primary_model)
+        for item in additional_routes:
+            if not isinstance(item, dict):
+                raise ValueError("Provider pool entries must be objects")
+            provider = item.get("provider")
+            model = str(item.get("model") or "").strip()
+            if not model:
+                raise ValueError("A provider pool route has no selected model")
+            add_route(
+                provider,
+                model,
+                weight=item.get("weight", 1),
+                max_concurrency=item.get("max_concurrency", 2),
+            )
+
+        self._provider_pool = routes
+        self._fallback_provider = None
+        self._fallback_model = None
+
+        if len(routes) > 1:
+            if self._config_path is None:
+                raise RuntimeError("Primary model configuration was not initialized")
+            config = json.loads(self._config_path.read_text(encoding="utf-8"))
+            env = config.setdefault("env", {})
+            if not isinstance(env, dict):
+                raise ValueError("Primary Strix configuration has an invalid env block")
+            env["STRIX_API_TYPE"] = "chat_completions"
+            self._config_path.write_text(json.dumps(config), encoding="utf-8")
+            try:
+                self._config_path.chmod(0o600)
+            except OSError:
+                pass
+            apply_config_override(self._config_path)
+            effective_settings = load_settings()
+            if effective_settings.llm.api_type != "chat_completions":
+                raise ValueError(
+                    "The process environment overrides STRIX_API_TYPE. The shared "
+                    "provider pool requires the OpenAI-compatible Chat Completions API."
+                )
+
+    async def _preflight_provider_pool(self) -> None:
+        """Probe every configured route and retain only endpoints that answer."""
+        if not self._provider_pool:
+            raise RuntimeError("The shared AI Router has no configured provider routes")
+
+        from ares.providers import build_model_reference
+        from strix.config.models import StrixProvider, configure_sdk_model_defaults
+
+        settings = load_settings()
+        configure_sdk_model_defaults(settings)
+        semaphore = asyncio.Semaphore(min(3, len(self._provider_pool)))
+
+        async def probe(route: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+            provider = route["provider"]
+            model_ref = build_model_reference(
+                str(provider["litellm_id"]), str(route["model"])
+            )
+            model = None
+            try:
+                model = StrixProvider(
+                    api_key=str(provider["api_key"]),
+                    base_url=str(provider["base_url"]),
+                ).get_model(model_ref)
+                async with semaphore:
+                    await preflight_request(
+                        model,
+                        model_name=model_ref,
+                        extra_headers=settings.llm.extra_headers,
+                        timeout=settings.llm.preflight_timeout,
+                        api_base_setting=f"Base URL for {provider.get('name', provider['id'])}",
+                    )
+                return route, None
+            except Exception as exc:
+                logger.warning(
+                    "AI Router route %s failed startup preflight (%s)",
+                    provider.get("name", provider["id"]),
+                    type(exc).__name__,
+                )
+                return route, f"{provider.get('name', provider['id'])}: {type(exc).__name__}"
+            finally:
+                if model is not None:
+                    try:
+                        await model.close()
+                    except Exception:
+                        logger.debug("Could not close temporary provider preflight model")
+
+        results = await asyncio.gather(*(probe(route) for route in self._provider_pool))
+        healthy = [route for route, error in results if error is None]
+        failures = [error for _, error in results if error is not None]
+        if not healthy:
+            raise RuntimeError(
+                "No provider in the shared AI Router passed its startup connection check. "
+                + "; ".join(str(item) for item in failures)
+            )
+        if failures:
+            logger.warning(
+                "AI Router temporarily excluded %d unhealthy provider route(s): %s",
+                len(failures),
+                "; ".join(str(item) for item in failures),
+            )
+        self._provider_pool = healthy
 
     @staticmethod
     def _build_mcp_requests(
@@ -233,6 +397,7 @@ class StrixAdapter:
         model: str,
         fallback_provider: dict[str, Any] | None = None,
         fallback_model: str | None = None,
+        provider_pool: list[dict[str, Any]] | None = None,
         scan_mode: str = "deep",
         scope_mode: str = "auto",
         diff_base: str | None = None,
@@ -252,9 +417,15 @@ class StrixAdapter:
         if scope_mode not in {"auto", "diff", "full"}:
             raise ValueError("Unsupported Strix scope mode")
         self._configure_model(provider, model)
-        self._configure_failover(provider, fallback_provider, fallback_model)
+        if provider_pool is None:
+            self._configure_failover(provider, fallback_provider, fallback_model)
+        else:
+            self._configure_provider_pool(provider, model, provider_pool)
         settings = load_settings()
-        await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
+        if self._provider_pool is None:
+            await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
+        else:
+            await self._preflight_provider_pool()
         args = self._args(
             targets=targets,
             instruction=instruction,
@@ -285,6 +456,7 @@ class StrixAdapter:
         model: str,
         fallback_provider: dict[str, Any] | None = None,
         fallback_model: str | None = None,
+        provider_pool: list[dict[str, Any]] | None = None,
         max_budget_usd: float | None = None,
         max_turns: int = 500,
         mcp_servers: list[dict[str, Any]] | None = None,
@@ -294,9 +466,15 @@ class StrixAdapter:
         if self.running:
             raise RuntimeError("A Strix scan is already running")
         self._configure_model(provider, model)
-        self._configure_failover(provider, fallback_provider, fallback_model)
+        if provider_pool is None:
+            self._configure_failover(provider, fallback_provider, fallback_model)
+        else:
+            self._configure_provider_pool(provider, model, provider_pool)
         settings = load_settings()
-        await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
+        if self._provider_pool is None:
+            await preflight_model_connection((settings.llm.model or "").strip(), settings=settings)
+        else:
+            await self._preflight_provider_pool()
         args = self._args(
             targets=[],
             instruction="",
@@ -369,6 +547,7 @@ class StrixAdapter:
                 primary_model_ref=self._model_ref,
                 fallback_provider=self._fallback_provider,
                 fallback_model=self._fallback_model,
+                provider_pool=self._provider_pool,
             ):
                 await run_strix_scan(
                     scan_config=self.scan_config,
